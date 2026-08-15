@@ -8,6 +8,10 @@ no auto-prod) still holds.
 (repo + vault). Tickets sit on stages. Everything else durable is a file.
 Inbound systems speak one word: **message**.
 
+Where it runs: [CLOUD.md](CLOUD.md) (VPS + Pages + tunnel, SQLite on a
+volume, no remote DB until we split writers). Factory is a **bixantil
+project**, not an ltfreitas0 product.
+
 Agentic bar: [~/base/principles/agentic-coding.md](../../../base/principles/agentic-coding.md),
 [e2e-verification.md](../../../base/principles/e2e-verification.md).
 Deep modules, small surfaces, no classitis. Proof is observation, not hope.

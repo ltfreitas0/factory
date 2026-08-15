@@ -36,7 +36,10 @@ def newest_session_file(cwd: Path, ticket_id: str | None) -> Path | None:
 
 
 def _decode(data: bytes) -> str:
-    import zstandard as zstd
+    try:
+        import zstandard as zstd
+    except ImportError:
+        return ""
 
     dctx = zstd.ZstdDecompressor()
     out = []

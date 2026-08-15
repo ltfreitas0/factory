@@ -69,3 +69,14 @@ def test_validate_ticket_skips_plan(tmp_path: Path):
     t = store.transition(conn, t["id"], "validating", "runner")
     t = store.transition(conn, t["id"], "done", "runner")
     assert t["state"] == "done"
+
+
+def test_apply_action_advance(tmp_path: Path):
+    conn = connect(tmp_path / "ax.db")
+    proj = store.ensure_project(conn, "demo", str(tmp_path), "true")
+    t = store.create_ticket(conn, project_id=proj["id"], title="x", body="")
+    assert t["stage"] == "inbox"
+    nxt = store.apply_action(conn, t["id"], {"name": "advance", "actor": "human"})
+    assert nxt["stage"] == "planning"
+    assert nxt["status"] == "ready"
+    assert nxt["state"] == "ready_to_plan"

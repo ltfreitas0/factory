@@ -103,13 +103,41 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     pcols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
     if "workflow" not in pcols:
         conn.execute("ALTER TABLE projects ADD COLUMN workflow TEXT")
+    if "active_instance" not in pcols:
+        conn.execute("ALTER TABLE projects ADD COLUMN active_instance TEXT DEFAULT 'dev'")
+    tcols = {r[1] for r in conn.execute("PRAGMA table_info(tickets)")}
+    if "stage" not in tcols:
+        conn.execute("ALTER TABLE tickets ADD COLUMN stage TEXT")
+    if "status" not in tcols:
+        conn.execute("ALTER TABLE tickets ADD COLUMN status TEXT")
     from factory import files as files_mod
     from factory import messages as messages_mod
+    from factory import project as project_mod
 
     files_mod.ensure_schema(conn)
     messages_mod.ensure_schema(conn)
+    _backfill_ticket_axes(conn)
+    for row in conn.execute("SELECT id, workflow FROM projects"):
+        if not row["workflow"]:
+            conn.execute(
+                "UPDATE projects SET workflow = ? WHERE id = ?",
+                (__import__("json").dumps(project_mod.DEFAULT_WORKFLOW), row["id"]),
+            )
     conn.commit()
     return conn
+
+
+def _backfill_ticket_axes(conn: sqlite3.Connection) -> None:
+    from factory.project import infer_stage_status
+
+    for row in conn.execute("SELECT id, state, stage, status FROM tickets"):
+        if row["stage"] and row["status"]:
+            continue
+        stage, status = infer_stage_status(row["state"])
+        conn.execute(
+            "UPDATE tickets SET stage = ?, status = ? WHERE id = ?",
+            (stage, status, row["id"]),
+        )
 
 
 def row_dict(row: sqlite3.Row | None) -> dict | None:

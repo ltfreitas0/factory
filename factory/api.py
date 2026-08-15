@@ -15,8 +15,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from factory import cost, feed, files, messages, obs, runner, sm, store
+from factory import auth, cost, dispatch, feed, files, messages, obs, project, runner, sm, store
 from factory.db import connect, rows
+from factory.machine import IllegalTransition as MachineIllegal
 from factory.messages import AuthError
 from factory.sm import IllegalTransition
 
@@ -29,7 +30,7 @@ async def lifespan(app: FastAPI):
     playground = ROOT / "data" / "playground"
     _ensure_git_repo(playground)
     store.ensure_playground(conn, str(playground))
-    corpora = Path("/home/bix/projects/corpora")
+    corpora = project.workspace_root() / "corpora"
     _ensure_git_repo(corpora, readme="# corpora\n")
     store.ensure_project(conn, "corpora", str(corpora), "scripts/validate")
     _seed_corpora(conn)
@@ -52,10 +53,29 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="factory", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=os.environ.get("FACTORY_CORS", "*").split(","),
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def board_auth(request, call_next):
+    path = request.url.path
+    if (
+        path in {"/api/health", "/auth/login"}
+        or path.startswith("/ingest/")
+        or not path.startswith("/api/")
+    ):
+        return await call_next(request)
+    presented = request.headers.get("authorization")
+    if presented and presented.lower().startswith("bearer "):
+        presented = presented.split(" ", 1)[1].strip()
+    else:
+        presented = request.query_params.get("token")
+    if not auth.check(presented):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return await call_next(request)
 
 
 @app.exception_handler(Exception)
@@ -187,9 +207,84 @@ def _project(slug: str):
     return dict(row)
 
 
+class LoginIn(BaseModel):
+    token: str = ""
+
+
+@app.post("/auth/login")
+def login(body: LoginIn):
+    if not auth.check(body.token or None):
+        raise HTTPException(401, "unauthorized")
+    return {"token": body.token or "", "ok": True}
+
+
 @app.get("/api/projects")
 def projects():
-    return rows(_db().execute("SELECT * FROM projects"))
+    out = []
+    for row in rows(_db().execute("SELECT * FROM projects")):
+        row["workflow"] = project.workflow_of(row)
+        out.append(row)
+    return out
+
+
+@app.get("/api/projects/{slug}")
+def get_project(slug: str):
+    return project.get(_db(), slug) or _project(slug)
+
+
+class WorkflowIn(BaseModel):
+    workflow: list[dict]
+
+
+@app.patch("/api/projects/{slug}")
+def patch_project(slug: str, body: WorkflowIn):
+    proj = _project(slug)
+    old = project.workflow_of(proj)
+    occ = project.occupied_stage_ids(_db(), proj["id"])
+    try:
+        project.validate_workflow_patch(old, body.workflow, occ)
+    except MachineIllegal as exc:
+        raise HTTPException(409, str(exc)) from exc
+    project.save_workflow(_db(), proj["id"], body.workflow)
+    return project.get(_db(), slug)
+
+
+class ActionIn(BaseModel):
+    name: str
+    actor: str = "human"
+    target: str | None = None
+    autonomy: bool = False
+
+
+@app.post("/api/tickets/{ticket_id}/action")
+def ticket_action(ticket_id: str, body: ActionIn):
+    try:
+        return store.apply_action(_db(), ticket_id, body.model_dump())
+    except MachineIllegal as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except KeyError:
+        raise HTTPException(404, "not found") from None
+
+
+class DispatchIn(BaseModel):
+    instance: str = "dev"
+    allow_prod: bool = False
+
+
+@app.post("/api/projects/{slug}/dispatch")
+def dispatch_project(slug: str, body: DispatchIn):
+    proj = _project(slug)
+    if body.allow_prod:
+        os.environ["FACTORY_ALLOW_PROD"] = "1"
+    try:
+        return dispatch.run(_db(), proj["id"], body.instance)
+    except dispatch.DispatchError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/projects/{slug}/files")
+def list_files(slug: str, prefix: str = "", store: str = "repo"):
+    return files.list_prefix(_db(), _project(slug)["id"], prefix, store)
 
 
 @app.post("/api/projects/{slug}/ingest-token")

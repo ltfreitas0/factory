@@ -89,11 +89,16 @@ function pendingLabel(t: Ticket): string {
   return t.state
 }
 
+const AUTH_KEY = 'factory-token'
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
-  })
+  const token = localStorage.getItem(AUTH_KEY)
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...((init?.headers as Record<string, string>) || {}),
+  }
+  if (token) headers.Authorization = `Bearer ${token}`
+  const res = await fetch(path, { ...init, headers })
   if (!res.ok) {
     const t = await res.text()
     throw new Error(t || res.statusText)
@@ -198,6 +203,8 @@ export default function App() {
   const [adding, setAdding] = useState(false)
   const [steer, setSteer] = useState('')
   const [errPane, setErrPane] = useState(false)
+  const [settings, setSettings] = useState(false)
+  const [ingestOnce, setIngestOnce] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [flash, setFlash] = useState<string | null>(null)
   const [feed, setFeed] = useState<FeedItem[]>([])
@@ -225,7 +232,8 @@ export default function App() {
   }, [load])
 
   useEffect(() => {
-    const es = new EventSource('/api/stream')
+    const tok = localStorage.getItem(AUTH_KEY)
+    const es = new EventSource(tok ? `/api/stream?token=${encodeURIComponent(tok)}` : '/api/stream')
     es.onmessage = (ev) => {
       try {
         const item = JSON.parse(ev.data) as FeedItem
@@ -324,6 +332,9 @@ export default function App() {
         <div className="flex items-center gap-2">
           <Button variant="ghost" size="sm" onClick={() => load()}>
             <RefreshCw size={18} />
+          </Button>
+          <Button variant={settings ? 'default' : 'ghost'} size="sm" onClick={() => setSettings((v) => !v)}>
+            settings
           </Button>
           <Button
             variant={errPane ? 'default' : 'ghost'}
@@ -510,6 +521,55 @@ export default function App() {
           </div>
         </aside>
 
+        {settings && (
+          <aside className="flex w-[340px] shrink-0 flex-col border-l border-border bg-panel">
+            <div className="border-b border-border px-4 py-3 text-[15px] tracking-[0.08em] text-muted">
+              PROJECT
+            </div>
+            <div className="flex flex-col gap-3 overflow-y-auto p-4 text-[15px]">
+              <p className="text-faint">
+                Ingest is one token per project. Rotate invalidates the old value. Pipeline lives
+                in files/pipeline.yml.
+              </p>
+              <Button
+                size="sm"
+                disabled={busy}
+                onClick={() =>
+                  act(async () => {
+                    const r = await api<{ token: string }>('/api/projects/corpora/ingest-token', {
+                      method: 'POST',
+                    })
+                    setIngestOnce(r.token)
+                  })
+                }
+              >
+                rotate ingest token
+              </Button>
+              {ingestOnce && (
+                <pre className="whitespace-pre-wrap break-all border border-border bg-bg p-2 text-[13px]">
+                  {ingestOnce}
+                  {'\n'}copy now — not shown again
+                </pre>
+              )}
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={busy}
+                onClick={() =>
+                  act(async () => {
+                    await api('/api/projects/corpora/dispatch', {
+                      method: 'POST',
+                      body: JSON.stringify({ instance: 'dev' }),
+                    })
+                  })
+                }
+              >
+                dispatch dev
+              </Button>
+            </div>
+          </aside>
+        )}
+
         {errPane && (
           <aside className="flex w-[340px] shrink-0 flex-col border-l border-border bg-panel">
             <div className="border-b border-border px-4 py-3 text-[15px] tracking-[0.08em] text-muted">
@@ -581,6 +641,22 @@ export default function App() {
                   }
                 >
                   approve plan
+                </Button>
+              )}
+              {detail.state === 'failed' && (
+                <Button
+                  size="sm"
+                  disabled={busy}
+                  onClick={() =>
+                    act(async () => {
+                      await api(`/api/tickets/${detail.id}/action`, {
+                        method: 'POST',
+                        body: JSON.stringify({ name: 'retry', actor: 'human' }),
+                      })
+                    })
+                  }
+                >
+                  retry
                 </Button>
               )}
               {detail.state === 'merge_review' && (

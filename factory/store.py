@@ -11,6 +11,9 @@ from pathlib import Path
 
 from factory import feed, obs, sm
 from factory.db import row_dict, rows
+from factory.machine import IllegalTransition as MachineIllegal
+from factory.machine import apply as machine_apply
+from factory.project import infer_stage_status, legacy_state, workflow_of
 
 
 def _now() -> str:
@@ -51,9 +54,9 @@ def ensure_project(
         return dict(conn.execute("SELECT * FROM projects WHERE slug = ?", (slug,)).fetchone())
     pid = _id("prj")
     conn.execute(
-        """INSERT INTO projects (id, slug, repo_path, validate_cmd, infra_plugin, created_at)
-           VALUES (?, ?, ?, ?, 'none', ?)""",
-        (pid, slug, repo_path, validate_cmd, _now()),
+        """INSERT INTO projects (id, slug, repo_path, validate_cmd, infra_plugin, created_at, workflow)
+           VALUES (?, ?, ?, ?, 'none', ?, ?)""",
+        (pid, slug, repo_path, validate_cmd, _now(), json.dumps(__import__("factory.project", fromlist=["DEFAULT_WORKFLOW"]).DEFAULT_WORKFLOW)),
     )
     conn.commit()
     return dict(conn.execute("SELECT * FROM projects WHERE id = ?", (pid,)).fetchone())
@@ -90,11 +93,13 @@ def create_ticket(
     if source not in ("human", "factory"):
         source = "human"
     state = "proposed" if source == "factory" else "inbox"
+    stage, status = infer_stage_status(state)
     conn.execute(
         """INSERT INTO tickets
-           (id, project_id, state, title, body, kind, source, parent_id, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (tid, project_id, state, title, body, kind, source, parent_id, now, now),
+           (id, project_id, state, title, body, kind, source, parent_id,
+            created_at, updated_at, stage, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (tid, project_id, state, title, body, kind, source, parent_id, now, now, stage, status),
     )
     add_event(
         conn,
@@ -289,9 +294,10 @@ def transition(
     src = t["state"]
     sm.transition(src, dst, actor)
     now = _now()
+    stage, status = infer_stage_status(dst)
     conn.execute(
-        "UPDATE tickets SET state = ?, updated_at = ? WHERE id = ?",
-        (dst, now, ticket_id),
+        "UPDATE tickets SET state = ?, stage = ?, status = ?, updated_at = ? WHERE id = ?",
+        (dst, stage, status, now, ticket_id),
     )
     add_event(
         conn,
@@ -306,6 +312,56 @@ def transition(
         f"{src} → {dst}",
         ticket_id=ticket_id,
         state=dst,
+        title=t.get("title"),
+    )
+    return get_ticket(conn, ticket_id)
+
+
+def apply_action(
+    conn: sqlite3.Connection,
+    ticket_id: str,
+    action: dict,
+) -> dict:
+    """Apply a generic machine action; keep legacy `state` in sync."""
+    t = get_ticket(conn, ticket_id)
+    if not t:
+        raise KeyError(ticket_id)
+    proj = conn.execute("SELECT * FROM projects WHERE id = ?", (t["project_id"],)).fetchone()
+    wf = workflow_of(dict(proj) if proj else {})
+    cur = {"stage": t.get("stage") or infer_stage_status(t["state"])[0], "status": t.get("status") or infer_stage_status(t["state"])[1]}
+    nxt = machine_apply(wf, cur, action)
+    state = legacy_state(nxt.get("stage"), nxt.get("status"), t["state"])
+    conn.execute(
+        """UPDATE tickets SET stage = ?, status = ?, state = ?, updated_at = ?
+           WHERE id = ?""",
+        (nxt.get("stage"), nxt.get("status"), state, _now(), ticket_id),
+    )
+    add_event(
+        conn,
+        "state_changed",
+        ticket_id=ticket_id,
+        payload={
+            "from": t.get("stage"),
+            "to": nxt.get("stage"),
+            "status": nxt.get("status"),
+            "action": action.get("name"),
+            "actor": action.get("actor"),
+        },
+    )
+    conn.commit()
+    obs.emit(
+        "state_changed",
+        ticket_id=ticket_id,
+        src=t.get("stage"),
+        dst=nxt.get("stage"),
+        actor=action.get("actor"),
+        action=action.get("name"),
+    )
+    feed.publish(
+        "cycle",
+        f"{t.get('stage')} → {nxt.get('stage')}",
+        ticket_id=ticket_id,
+        state=state,
         title=t.get("title"),
     )
     return get_ticket(conn, ticket_id)
@@ -348,19 +404,31 @@ def finish_run(
 
 def claim_auto(conn: sqlite3.Connection) -> dict | None:
     """One unlocked ticket whose next step is an auto runner edge."""
-    for src, dst in (
-        ("ready_to_plan", "planning"),
-        ("ready_to_validate", "validating"),
-        ("implementing", None),  # already in stage — runner owns the work
-        ("validating", None),
-        ("pr_open", "merge_review"),
-        ("integrating", None),
-        ("planning", None),
+    row = conn.execute(
+        """SELECT t.* FROM tickets t
+           JOIN projects p ON p.id = t.project_id
+           WHERE t.status = 'ready' AND t.stage IS NOT NULL
+           ORDER BY t.updated_at ASC"""
+    ).fetchall()
+    for r in row:
+        proj = dict(conn.execute("SELECT * FROM projects WHERE id = ?", (r["project_id"],)).fetchone())
+        wf = workflow_of(proj)
+        st = next((s for s in wf if s.get("id") == r["stage"]), None)
+        if st and st.get("kind") in {"agent", "plugin"} and not st.get("muted"):
+            return dict(r)
+    for src in (
+        "ready_to_plan",
+        "ready_to_validate",
+        "implementing",
+        "validating",
+        "pr_open",
+        "integrating",
+        "planning",
     ):
-        row = conn.execute(
+        old = conn.execute(
             "SELECT * FROM tickets WHERE state = ? ORDER BY updated_at ASC LIMIT 1",
             (src,),
         ).fetchone()
-        if row:
-            return dict(row)
+        if old:
+            return dict(old)
     return None

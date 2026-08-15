@@ -4,6 +4,10 @@ Recorded 2026-08-15. This is the destination, not the current build. Near-term U
 
 **One-liner.** Factory is a full-stack product **builder, maintainer, and manager**. A human stays in the loop for ideation, refinement, and feedback. The factory does the rest: tickets, agents, deploys, errors, integrations.
 
+Reduced shape (board + files + messages): [SHAPE.md](SHAPE.md).
+Cloud host + SQLite persistence: [CLOUD.md](CLOUD.md).
+This repo is the factory **project** (`bixantil/factory`). Issued products use the ltfreitas0 sandbox.
+
 Today the human (via Grok) *is* the factory agent, issuing batches by hand. That role becomes a **first-class in-product agent**. The operator’s job is mostly **user**, not orchestrator.
 
 ---
