@@ -9,7 +9,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from factory import feed
+from factory import feed, trace
 
 
 @dataclass
@@ -28,9 +28,26 @@ def available() -> bool:
     return shutil.which(_bin()) is not None
 
 
+def _pump(stream, chunks: list[str], kind: str, ticket_id: str | None) -> None:
+    """Forward bytes as they arrive so the UI can show a live token feed."""
+    assert stream is not None
+    while True:
+        piece = stream.read(64)
+        if not piece:
+            break
+        chunks.append(piece)
+        feed.publish(kind, piece, ticket_id=ticket_id)
+
+
 def run(cwd: Path, brief: str, timeout: int = 600, ticket_id: str | None = None) -> WorkerResult:
     cmd = [_bin(), "--profile", "headless", brief]
     feed.publish("agent", f"$ {' '.join(cmd[:3])} …", ticket_id=ticket_id)
+    env = os.environ.copy()
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    env.setdefault("NODE_DISABLE_COLORS", "1")
+    env.setdefault("CI", "1")
+    env.setdefault("PLAYWRIGHT_HEADLESS", "1")
+    env["HEADLESS"] = "1"
     try:
         proc = subprocess.Popen(
             cmd,
@@ -38,34 +55,42 @@ def run(cwd: Path, brief: str, timeout: int = 600, ticket_id: str | None = None)
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env=os.environ.copy(),
+            bufsize=0,
+            env=env,
         )
         out_chunks: list[str] = []
         err_chunks: list[str] = []
 
-        def pump(stream, chunks, kind: str) -> None:
-            assert stream is not None
-            for line in stream:
-                chunks.append(line)
-                text = line.rstrip("\n")
-                if text:
-                    feed.publish(kind, text, ticket_id=ticket_id)
-
-        t_out = threading.Thread(target=pump, args=(proc.stdout, out_chunks, "agent"), daemon=True)
-        t_err = threading.Thread(target=pump, args=(proc.stderr, err_chunks, "stderr"), daemon=True)
+        t_out = threading.Thread(
+            target=_pump, args=(proc.stdout, out_chunks, "agent", ticket_id), daemon=True
+        )
+        t_err = threading.Thread(
+            target=_pump, args=(proc.stderr, err_chunks, "stderr", ticket_id), daemon=True
+        )
         t_out.start()
         t_err.start()
+        stop = {"v": False}
+        t_tr = threading.Thread(
+            target=trace.tail,
+            args=(cwd, ticket_id, lambda: stop["v"], timeout + 5),
+            daemon=True,
+        )
+        t_tr.start()
         try:
             code = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
+            stop["v"] = True
             proc.kill()
             proc.wait()
             t_out.join(timeout=2)
             t_err.join(timeout=2)
+            t_tr.join(timeout=2)
             feed.publish("stderr", "worker timeout", ticket_id=ticket_id)
             return WorkerResult(ok=False, stdout="".join(out_chunks), stderr="timeout", code=124)
+        stop["v"] = True
         t_out.join(timeout=2)
         t_err.join(timeout=2)
+        t_tr.join(timeout=2)
         return WorkerResult(
             ok=code == 0,
             stdout="".join(out_chunks),
@@ -93,6 +118,8 @@ def implement_brief(title: str, body: str, plan: str) -> str:
         f"Ticket: {title}\n\n{body}\n\n"
         f"Approved plan:\n{plan}\n\n"
         "Make the smallest change that satisfies the plan. "
-        "Add or update tests so the project's validate command passes. "
-        "When done, print a short summary of files changed."
+        "Add or update tests so scripts/validate exits 0 (create that script if missing). "
+        "Never launch a visible browser. Browser tests must use Playwright headless "
+        "(CI=1, PLAYWRIGHT_HEADLESS=1, launch({ headless: true })). Prefer vitest + happy-dom "
+        "for unit tests. When done, print a short summary of files changed."
     )

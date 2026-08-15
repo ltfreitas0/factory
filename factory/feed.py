@@ -12,15 +12,24 @@ from typing import Any
 _lock = threading.Lock()
 _buf: deque[dict] = deque(maxlen=300)
 _subs: list[Queue] = []
+_sink = None  # optional persist callback(item)
 
 
-def publish(kind: str, text: str, *, ticket_id: str | None = None, state: str | None = None) -> dict:
+def publish(
+    kind: str,
+    text: str,
+    *,
+    ticket_id: str | None = None,
+    state: str | None = None,
+    title: str | None = None,
+) -> dict:
     item = {
         "at": time.strftime("%H:%M:%S"),
         "kind": kind,
         "text": text,
         "ticket_id": ticket_id,
         "state": state,
+        "title": title,
     }
     with _lock:
         _buf.append(item)
@@ -32,7 +41,25 @@ def publish(kind: str, text: str, *, ticket_id: str | None = None, state: str | 
                 dead.append(q)
         for q in dead:
             _subs.remove(q)
+    sink = _sink
+    if sink is not None:
+        try:
+            sink(item)
+        except Exception:
+            pass
     return item
+
+
+def set_sink(fn) -> None:
+    global _sink
+    _sink = fn
+
+
+def hydrate(items: list[dict]) -> None:
+    with _lock:
+        _buf.clear()
+        for item in items[-300:]:
+            _buf.append(item)
 
 
 def history() -> list[dict]:

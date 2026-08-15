@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from queue import Empty
 from threading import Thread
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from factory import feed, obs, runner, sm, store
+from factory import cost, feed, files, messages, obs, runner, sm, store
 from factory.db import connect, rows
+from factory.messages import AuthError
 from factory.sm import IllegalTransition
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -28,9 +31,17 @@ async def lifespan(app: FastAPI):
     store.ensure_playground(conn, str(playground))
     corpora = Path("/home/bix/projects/corpora")
     _ensure_git_repo(corpora, readme="# corpora\n")
-    store.ensure_project(conn, "corpora", str(corpora), "true")
+    store.ensure_project(conn, "corpora", str(corpora), "scripts/validate")
     _seed_corpora(conn)
     app.state.db = conn
+    feed.set_sink(lambda item: store.append_feed(conn, item))
+    feed.hydrate(store.load_feed(conn))
+    try:
+        n = cost.backfill(conn)
+        if n:
+            obs.emit("cost_backfill", runs=n)
+    except Exception as exc:
+        obs.emit("cost_backfill_fail", message=str(exc))
     t = Thread(target=runner.loop, daemon=True)
     t.start()
     obs.emit("api_start")
@@ -64,6 +75,8 @@ class TicketIn(BaseModel):
     title: str
     body: str = ""
     project: str = "corpora"
+    kind: str = "build"
+    source: str = "human"
 
 
 class TransitionIn(BaseModel):
@@ -102,31 +115,49 @@ def _ensure_git_repo(path: Path, readme: str | None = None) -> None:
         )
 
 
+CORPORA_BRIEF = """Build CORPORA v1 in this repo. Product: agent-native kanban + auth + MCP.
+
+Intent is in .meta/readme.d (executive summary only). CORPORA is the product —
+not a second factory UI, not QM, not Slack.
+
+v1 slice — keep it small:
+1. Auth: simple bearer token. Unauthenticated writes are rejected.
+2. Kanban: columns (todo / doing / done) and cards (title, body, assignee, column).
+3. Human UI: one page, columns + cards. SQLite is fine.
+4. MCP server: list / read / create / move cards. Same auth as the HTTP API.
+5. Tests that prove: a caller can move a card with a valid token, and is rejected without one.
+
+Stack: Python FastAPI + SQLite + a tiny HTML or React UI, or bun + Hono. Pick one and stay tiny.
+
+Validation: you MUST add an executable scripts/validate that runs the test suite and exits 0. Document how to run the app and the tests in README.
+
+Do not implement Slack, QM, multiplayer harness, crons, or cloud deploy.
+"""
+
+
 def _seed_corpora(conn) -> None:
-    spec = Path("/home/bix/projects/corpora/.meta/readme.d")
-    n = conn.execute(
-        """SELECT COUNT(*) n FROM tickets t
-           JOIN projects p ON p.id = t.project_id WHERE p.slug = 'corpora'"""
-    ).fetchone()["n"]
-    if n:
-        return
     proj = conn.execute("SELECT * FROM projects WHERE slug = 'corpora'").fetchone()
     if not proj:
         return
-    body = spec.read_text() if spec.exists() else "Build CORPORA v1."
+    existing = conn.execute(
+        """SELECT t.id, t.state FROM tickets t
+           WHERE t.project_id = ? AND t.title LIKE 'CORPORA v1%'
+           ORDER BY t.created_at ASC LIMIT 1""",
+        (proj["id"],),
+    ).fetchone()
+    if existing:
+        if existing["state"] == "inbox":
+            conn.execute(
+                "UPDATE tickets SET body = ? WHERE id = ?",
+                (CORPORA_BRIEF, existing["id"]),
+            )
+            conn.commit()
+        return
     store.create_ticket(
         conn,
         project_id=proj["id"],
         title="CORPORA v1: agent-native kanban + auth + MCP",
-        body=(
-            "Build CORPORA in this repo. Source of truth for product intent:\n\n"
-            f"{body}\n\n"
-            "First vertical slice: authenticated kanban (columns, cards, assignees) "
-            "plus an MCP surface agents can list/read/create/move cards. "
-            "Keep v1 small. Add tests that prove an agent can move a card with "
-            "valid auth and is rejected without it.\n\n"
-            "Validation: a test command you add must pass; document it in README."
-        ),
+        body=CORPORA_BRIEF,
     )
 
 
@@ -149,14 +180,94 @@ def health():
     }
 
 
+def _project(slug: str):
+    row = _db().execute("SELECT * FROM projects WHERE slug = ?", (slug,)).fetchone()
+    if not row:
+        raise HTTPException(404, "unknown project")
+    return dict(row)
+
+
 @app.get("/api/projects")
 def projects():
     return rows(_db().execute("SELECT * FROM projects"))
 
 
+@app.post("/api/projects/{slug}/ingest-token")
+def mint_ingest(slug: str):
+    """Rotate the project's only ingest token. Plaintext is returned once."""
+    proj = _project(slug)
+    token = messages.rotate_ingest_token(_db(), proj["id"])
+    obs.emit("ingest_token_rotated", project=slug)
+    return {"token": token, "once": True}
+
+
+class IngestIn(BaseModel):
+    source: str = "app"
+    payload: dict = Field(default_factory=dict)
+
+
+@app.post("/ingest/{slug}/messages")
+def ingest_message(slug: str, body: IngestIn, authorization: str | None = Header(default=None)):
+    proj = _project(slug)
+    token = None
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+    try:
+        msg = messages.ingest(_db(), proj["id"], token, body.source, body.payload)
+    except AuthError:
+        raise HTTPException(401, "invalid ingest token") from None
+    import json as _json
+
+    wf = []
+    raw = proj.get("workflow")
+    if raw:
+        try:
+            wf = _json.loads(raw)
+        except _json.JSONDecodeError:
+            wf = []
+    if not wf:
+        wf = [
+            {"id": "inbox", "kind": "human"},
+            {"id": "build", "kind": "agent"},
+        ]
+    processed = messages.process(_db(), proj["id"], msg["id"], wf)
+    obs.emit(
+        "message_ingested",
+        project=slug,
+        message_id=msg["id"],
+        source=body.source,
+        dropped=bool((processed.get("result") or {}).get("drop")),
+    )
+    return processed
+
+
+@app.get("/api/projects/{slug}/messages")
+def project_messages(slug: str):
+    return messages.list_messages(_db(), _project(slug)["id"])
+
+
+@app.put("/api/projects/{slug}/files/{path:path}")
+def put_file(slug: str, path: str, body: dict):
+    proj = _project(slug)
+    store_name = body.get("store") or "repo"
+    try:
+        return files.put(_db(), proj["id"], path, body.get("body") or "", store=store_name)
+    except files.FileError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/projects/{slug}/files/{path:path}")
+def get_file(slug: str, path: str, store: str = "repo"):
+    proj = _project(slug)
+    try:
+        return files.get(_db(), proj["id"], path, store=store)
+    except files.FileError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
 @app.get("/api/tickets")
-def tickets():
-    return store.list_tickets(_db())
+def tickets(project: str | None = None):
+    return store.list_tickets(_db(), project=project)
 
 
 @app.post("/api/tickets")
@@ -165,7 +276,14 @@ def create_ticket(body: TicketIn):
     proj = conn.execute("SELECT * FROM projects WHERE slug = ?", (body.project,)).fetchone()
     if not proj:
         raise HTTPException(404, "unknown project")
-    return store.create_ticket(conn, project_id=proj["id"], title=body.title, body=body.body)
+    return store.create_ticket(
+        conn,
+        project_id=proj["id"],
+        title=body.title,
+        body=body.body,
+        kind=body.kind,
+        source=body.source,
+    )
 
 
 @app.get("/api/tickets/{ticket_id}")
@@ -188,7 +306,13 @@ def do_transition(ticket_id: str, body: TransitionIn):
 
 @app.post("/api/tickets/{ticket_id}/accept")
 def accept(ticket_id: str):
-    return do_transition(ticket_id, TransitionIn(to="ready_to_plan", actor="human"))
+    t = store.get_ticket(_db(), ticket_id)
+    if not t:
+        raise HTTPException(404, "not found")
+    dest = "ready_to_validate" if t.get("kind") == "validate" else "ready_to_plan"
+    if t["state"] not in ("inbox", "proposed"):
+        raise HTTPException(409, f"cannot accept from {t['state']}")
+    return do_transition(ticket_id, TransitionIn(to=dest, actor="human"))
 
 
 @app.post("/api/tickets/{ticket_id}/approve-plan")
@@ -248,18 +372,45 @@ def feed_history():
     return feed.history()
 
 
+@app.get("/api/costs")
+def costs(project: str = "corpora"):
+    conn = _db()
+    proj = conn.execute("SELECT * FROM projects WHERE slug = ?", (project,)).fetchone()
+    if not proj:
+        raise HTTPException(404, "unknown project")
+    return cost.project_total(conn, proj["id"])
+
+
 @app.get("/api/stream")
 async def stream():
     q = feed.subscribe()
 
+    def _snapshot() -> dict:
+        active = store.active_ticket(_db())
+        return {
+            "at": time.strftime("%H:%M:%S"),
+            "kind": "snapshot",
+            "text": (active["title"] if active else "idle"),
+            "ticket_id": active["id"] if active else None,
+            "state": active["state"] if active else None,
+            "title": active["title"] if active else None,
+        }
+
     async def gen():
         try:
             yield ": connected\n\n"
+            yield f"data: {feed.dump(_snapshot())}\n\n"
             for item in feed.history():
+                if item.get("kind") == "snapshot":
+                    continue
                 yield f"data: {feed.dump(item)}\n\n"
             loop = asyncio.get_event_loop()
             while True:
-                item = await loop.run_in_executor(None, q.get)
+                try:
+                    item = await loop.run_in_executor(None, lambda: q.get(timeout=15))
+                except Empty:
+                    yield ": ping\n\n"
+                    continue
                 yield f"data: {feed.dump(item)}\n\n"
         finally:
             feed.unsubscribe(q)

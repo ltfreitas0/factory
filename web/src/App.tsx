@@ -6,9 +6,13 @@ import { cn } from './lib/utils'
 type Ticket = {
   id: string
   project_id: string
+  project?: string
   state: string
   title: string
   body: string
+  kind?: string
+  tokens?: number
+  usd?: number
   updated_at: string
 }
 
@@ -21,8 +25,18 @@ type Health = {
   open_tickets: number
   errors: number
   active?: { id: string; state: string; title: string } | null
+  default_project?: string
 }
-type FeedItem = { at: string; kind: string; text: string; ticket_id?: string | null; state?: string | null }
+type Costs = { tokens: number; usd: number; estimate: boolean }
+type FeedItem = {
+  at: string
+  kind: string
+  text: string
+  ticket_id?: string | null
+  state?: string | null
+  title?: string | null
+}
+type Live = { id: string | null; state: string; title: string }
 
 const CYCLE = [
   { id: 'inbox', label: 'inbox' },
@@ -36,6 +50,7 @@ const CYCLE = [
 
 function cycleId(state: string): string {
   if (state === 'ready_to_plan') return 'planning'
+  if (state === 'ready_to_validate') return 'validating'
   if (state === 'pr_open' || state === 'integrating') return 'merge_review'
   if (state === 'failed' || state === 'needs_human') return state
   return state
@@ -52,15 +67,26 @@ const COLS = [
   'failed',
 ] as const
 
+const ROWS: (typeof COLS)[number][][] = [COLS.slice(0, 4), COLS.slice(4)]
+
 const COL_LABEL: Record<string, string> = {
   inbox: 'Inbox',
   planning: 'Planning',
-  plan_review: 'Plan',
+  plan_review: 'Review',
   implementing: 'Build',
   validating: 'Check',
   merge_review: 'Merge',
   done: 'Done',
   failed: 'Failed',
+}
+
+const PENDING_STATES = new Set(['proposed', 'plan_review', 'merge_review'])
+
+function pendingLabel(t: Ticket): string {
+  if (t.state === 'proposed') return 'approve spawn'
+  if (t.state === 'plan_review') return 'approve plan'
+  if (t.state === 'merge_review') return 'approve merge'
+  return t.state
 }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -79,37 +105,123 @@ function latest(docs: Doc[], kind: string): Doc | undefined {
   return docs.filter((d) => d.kind === kind).sort((a, b) => b.version - a.version)[0]
 }
 
+function applyFeed(prev: FeedItem[], item: FeedItem): FeedItem[] {
+  if (item.kind === 'snapshot') return prev
+  if (item.kind === 'token' || item.kind === 'think') {
+    const last = prev[prev.length - 1]
+    if (last && last.kind === item.kind && last.ticket_id === item.ticket_id) {
+      return [...prev.slice(0, -1), { ...last, text: last.text + item.text }].slice(-400)
+    }
+    return [...prev, item].slice(-400)
+  }
+  const next = [...prev, item]
+  return next.length > 400 ? next.slice(-400) : next
+}
+
+function CycleDial({ live }: { live: Live | null }) {
+  const cx = 140
+  const cy = 140
+  const r = 92
+  const active = live ? cycleId(live.state) : ''
+  const running = Boolean(live && live.state && live.state !== 'done' && live.state !== 'inbox')
+  const activeLabel = CYCLE.find((s) => s.id === active)?.label ?? (active || 'idle')
+
+  return (
+    <div className="flex flex-col items-center gap-2 border-t border-border px-3 py-4">
+      <div className="text-[13px] tracking-[0.08em] text-muted">CYCLE</div>
+      <svg viewBox="0 0 280 280" className="h-[260px] w-[260px]">
+        <circle cx={cx} cy={cy} r={r} fill="none" stroke="#181818" strokeWidth="2" />
+        {running && (
+          <circle
+            className="cycle-spin"
+            cx={cx}
+            cy={cy}
+            r={r}
+            fill="none"
+            stroke="#ea580c"
+            strokeWidth="2"
+            strokeDasharray="8 22"
+            strokeLinecap="round"
+            opacity="0.7"
+          />
+        )}
+        {CYCLE.map((step, i) => {
+          const angle = (i / CYCLE.length) * Math.PI * 2 - Math.PI / 2
+          const x = cx + r * Math.cos(angle)
+          const y = cy + r * Math.sin(angle)
+          const lx = cx + (r + 28) * Math.cos(angle)
+          const ly = cy + (r + 28) * Math.sin(angle)
+          const on = active === step.id
+          return (
+            <g key={step.id}>
+              <circle
+                cx={x}
+                cy={y}
+                r={on ? 9 : 6}
+                className={on ? 'cycle-live' : undefined}
+                fill={on ? '#ea580c' : '#0c0c0c'}
+                stroke={on ? '#ea580c' : '#3f3f46'}
+                strokeWidth="2"
+              />
+              <text
+                x={lx}
+                y={ly}
+                textAnchor="middle"
+                dominantBaseline="middle"
+                fill={on ? '#ea580c' : '#6b6b76'}
+                fontSize="13"
+              >
+                {step.label}
+              </text>
+            </g>
+          )
+        })}
+        <text x={cx} y={cy - 8} textAnchor="middle" fill="#ea580c" fontSize="16">
+          {activeLabel}
+        </text>
+        <text x={cx} y={cy + 14} textAnchor="middle" fill="#6b6b76" fontSize="11">
+          {live?.title ? live.title.slice(0, 22) : 'idle'}
+        </text>
+      </svg>
+    </div>
+  )
+}
+
 export default function App() {
   const [tickets, setTickets] = useState<Ticket[]>([])
   const [sel, setSel] = useState<string | null>(null)
   const [detail, setDetail] = useState<Detail | null>(null)
   const [errors, setErrors] = useState<Err[]>([])
   const [health, setHealth] = useState<Health | null>(null)
+  const [costs, setCosts] = useState<Costs | null>(null)
   const [title, setTitle] = useState('')
-  const [body, setBody] = useState('')
+  const [adding, setAdding] = useState(false)
   const [steer, setSteer] = useState('')
   const [errPane, setErrPane] = useState(false)
   const [busy, setBusy] = useState(false)
   const [flash, setFlash] = useState<string | null>(null)
   const [feed, setFeed] = useState<FeedItem[]>([])
+  const [live, setLive] = useState<Live | null>(null)
   const feedEnd = useRef<HTMLDivElement>(null)
+  const selRef = useRef<string | null>(null)
+  selRef.current = sel
 
   const load = useCallback(async () => {
-    const [ts, es, h] = await Promise.all([
-      api<Ticket[]>('/api/tickets'),
+    const [ts, es, h, c] = await Promise.all([
+      api<Ticket[]>('/api/tickets?project=corpora'),
       api<Err[]>('/api/errors?limit=50'),
       api<Health>('/api/health'),
+      api<Costs>('/api/costs?project=corpora').catch(() => null),
     ])
     setTickets(ts)
     setErrors(es)
     setHealth(h)
-    if (sel) setDetail(await api<Detail>(`/api/tickets/${sel}`))
-  }, [sel])
+    if (c) setCosts(c)
+    if (selRef.current) setDetail(await api<Detail>(`/api/tickets/${selRef.current}`))
+  }, [])
 
   useEffect(() => {
     load().catch((e) => setFlash(String(e)))
-    const id = setInterval(() => load().catch(() => {}), 2500)
-    return () => clearInterval(id)
   }, [load])
 
   useEffect(() => {
@@ -117,16 +229,23 @@ export default function App() {
     es.onmessage = (ev) => {
       try {
         const item = JSON.parse(ev.data) as FeedItem
-        setFeed((prev) => {
-          const next = [...prev, item]
-          return next.length > 400 ? next.slice(-400) : next
-        })
+        if (item.kind === 'snapshot' || item.kind === 'cycle') {
+          setLive(
+            item.state
+              ? { id: item.ticket_id ?? null, state: item.state, title: item.title || item.text }
+              : null,
+          )
+        }
+        if (item.kind === 'cycle') {
+          load().catch(() => {})
+        }
+        setFeed((prev) => applyFeed(prev, item))
       } catch {
         /* ignore */
       }
     }
     return () => es.close()
-  }, [])
+  }, [load])
 
   useEffect(() => {
     feedEnd.current?.scrollIntoView({ block: 'end' })
@@ -136,7 +255,17 @@ export default function App() {
     const m: Record<string, Ticket[]> = {}
     for (const c of COLS) m[c] = []
     for (const t of tickets) {
-      const mapped = t.state === 'ready_to_plan' ? 'planning' : t.state === 'pr_open' || t.state === 'integrating' ? 'merge_review' : t.state
+      if (t.state === 'proposed') continue
+      const mapped =
+        t.state === 'ready_to_plan'
+          ? 'planning'
+          : t.state === 'ready_to_validate'
+            ? 'validating'
+            : t.state === 'pr_open' || t.state === 'integrating'
+              ? 'merge_review'
+              : t.state === 'needs_human'
+                ? 'failed'
+                : t.state
       const col = COLS.includes(mapped as (typeof COLS)[number]) ? mapped : 'failed'
       ;(m[col] ??= []).push(t)
     }
@@ -158,103 +287,186 @@ export default function App() {
 
   const plan = detail ? latest(detail.documents, 'plan') : undefined
   const result = detail ? latest(detail.documents, 'result') : undefined
-  const live = health?.active
-  const liveState = live ? cycleId(live.state) : ''
+  const streaming = feed.some((f) => f.kind === 'token' || f.kind === 'think')
+  const events = feed.filter((f) => f.kind !== 'token' && f.kind !== 'think')
+  const stream = feed.filter((f) => f.kind === 'token' || f.kind === 'think' || f.kind === 'tool')
+  const pending = tickets.filter((t) => PENDING_STATES.has(t.state))
+
+  function openTicket(id: string) {
+    setSel(id)
+    api<Detail>(`/api/tickets/${id}`)
+      .then(setDetail)
+      .catch((e) => setFlash(String(e)))
+  }
+
+  function closeTicket() {
+    setSel(null)
+    setDetail(null)
+  }
 
   return (
     <div className="flex h-full flex-col bg-bg text-fg">
-      <header className="flex flex-col border-b border-border bg-panel">
-        <div className="flex h-12 items-center justify-between px-4">
-          <div className="flex items-center gap-4">
-            <span className="text-[15px] tracking-[0.16em] text-accent">FACTORY</span>
-            <span className="text-muted">
-              {health ? `${health.open_tickets} open · ${health.errors} errors` : '…'}
+      <header className="flex h-16 items-center justify-between border-b border-border bg-panel px-5">
+        <div className="flex items-center gap-4">
+          <span className="text-[20px] tracking-[0.16em] text-accent">FACTORY</span>
+          <span className="text-muted">CORPORA</span>
+          <span className="text-faint">
+            {health ? `${health.open_tickets} open · ${health.errors} errors` : '…'}
+          </span>
+          {costs && (
+            <span className="text-accent" title="estimated from dsh session traces">
+              {costs.estimate ? 'est. ' : ''}${costs.usd.toFixed(3)} ·{' '}
+              {(costs.tokens / 1000).toFixed(1)}k tok
             </span>
-            {live && <span className="text-faint">· {live.title}</span>}
-          </div>
-          <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" onClick={() => load()}>
-              <RefreshCw size={14} />
-            </Button>
-            <Button
-              variant={errPane ? 'default' : 'ghost'}
-              size="sm"
-              onClick={() => setErrPane((v) => !v)}
-            >
-              <Activity size={14} /> health
-            </Button>
-          </div>
+          )}
+          {live?.title && <span className="text-accent">{live.title}</span>}
         </div>
-        <div className="flex items-center gap-1 overflow-x-auto border-t border-border px-4 py-2">
-          {CYCLE.map((step, i) => (
-            <div key={step.id} className="flex items-center gap-1">
-              {i > 0 && <span className="px-1 text-faint">→</span>}
-              <span
-                className={cn(
-                  'rounded-sm px-2 py-1 text-[13px] tracking-[0.08em]',
-                  liveState === step.id
-                    ? 'border border-accent bg-accent/15 text-accent'
-                    : 'border border-transparent text-muted',
-                )}
-              >
-                {step.label}
-              </span>
-            </div>
-          ))}
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="sm" onClick={() => load()}>
+            <RefreshCw size={18} />
+          </Button>
+          <Button
+            variant={errPane ? 'default' : 'ghost'}
+            size="sm"
+            onClick={() => setErrPane((v) => !v)}
+          >
+            <Activity size={18} /> health
+          </Button>
         </div>
       </header>
 
       {flash && (
-        <div className="border-b border-red-900 bg-red-950/40 px-[10px] py-1 text-red-300">{flash}</div>
+        <div className="border-b border-red-900 bg-red-950/40 px-4 py-2 text-red-300">{flash}</div>
       )}
 
       <div className="flex min-h-0 flex-1">
-        <aside className="flex w-[300px] shrink-0 flex-col border-r border-border bg-panel">
-          <div className="border-b border-border px-3 py-2 text-[12px] tracking-[0.08em] text-muted">
-            NEW · CORPORA
+        <aside className="flex w-[340px] shrink-0 flex-col overflow-hidden border-r border-border bg-panel">
+          <div className="shrink-0 border-b border-border">
+            <CycleDial live={live} />
           </div>
-          <form
-            className="flex flex-col gap-2 border-b border-border p-3"
-            onSubmit={(e) => {
-              e.preventDefault()
-              if (!title.trim()) return
-              act(async () => {
-                const t = await api<Ticket>('/api/tickets', {
-                  method: 'POST',
-                  body: JSON.stringify({ title, body, project: 'corpora' }),
-                })
-                setTitle('')
-                setBody('')
-                setSel(t.id)
-              })
-            }}
-          >
-            <input
-              className="h-9 border border-border bg-bg px-2 text-[15px] text-fg outline-none focus:border-accent"
-              placeholder="title"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-            />
-            <textarea
-              className="h-20 resize-none border border-border bg-bg p-2 text-[15px] text-fg outline-none focus:border-accent"
-              placeholder="what should the factory do?"
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-            />
-            <Button type="submit" disabled={busy || !title.trim()}>
-              <Plus size={14} /> file
-            </Button>
-          </form>
-          <div className="border-b border-border px-3 py-2 text-[12px] tracking-[0.08em] text-muted">
-            AGENT FEED
+          <div className="flex min-h-0 flex-1 flex-col border-b border-border">
+            <div className="border-b border-border px-4 py-2.5 text-[14px] tracking-[0.08em] text-muted">
+              PENDING <span className="text-faint">{pending.length}</span>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto p-2">
+              {pending.length === 0 && <p className="px-2 py-3 text-faint">nothing waiting on you</p>}
+              {pending.map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => openTicket(t.id)}
+                  className="mb-1.5 w-full border border-border bg-bg px-3 py-2.5 text-left hover:border-accent"
+                >
+                  <div className="text-[13px] tracking-[0.06em] text-accent">{pendingLabel(t)}</div>
+                  <div className="line-clamp-2 text-[16px]">{t.title}</div>
+                </button>
+              ))}
+            </div>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2 font-mono text-[13px] leading-5">
-            {feed.length === 0 && <p className="text-faint">waiting for a run…</p>}
-            {feed.map((line, i) => (
+          <div className="shrink-0 px-4 py-3 text-[13px] text-faint">
+            {live?.title ? live.title : 'idle'}
+          </div>
+        </aside>
+
+        <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {ROWS.map((row, ri) => (
+            <div
+              key={ri}
+              className={cn(
+                'flex min-h-0 min-w-0 flex-1',
+                ri === 0 && 'border-b border-border',
+              )}
+            >
+              {row.map((col) => (
+                <section
+                  key={col}
+                  className="flex min-w-0 flex-1 flex-col border-r border-border"
+                >
+                  <div className="flex items-center justify-between border-b border-border px-4 py-3 text-[16px] tracking-[0.08em] text-muted">
+                    <span>
+                      {COL_LABEL[col]} <span className="text-faint">{grouped[col]?.length ?? 0}</span>
+                    </span>
+                    {col === 'inbox' && (
+                      <button
+                        type="button"
+                        className="text-accent hover:text-fg"
+                        title="new ticket"
+                        onClick={() => setAdding((v) => !v)}
+                      >
+                        <Plus size={18} />
+                      </button>
+                    )}
+                  </div>
+                  {col === 'inbox' && adding && (
+                    <form
+                      className="border-b border-border p-2"
+                      onSubmit={(e) => {
+                        e.preventDefault()
+                        if (!title.trim()) return
+                        act(async () => {
+                          const t = await api<Ticket>('/api/tickets', {
+                            method: 'POST',
+                            body: JSON.stringify({ title, project: 'corpora', kind: 'build' }),
+                          })
+                          setTitle('')
+                          setAdding(false)
+                          openTicket(t.id)
+                        })
+                      }}
+                    >
+                      <input
+                        autoFocus
+                        className="h-10 w-full border border-border bg-bg px-2 text-[15px] outline-none focus:border-accent"
+                        placeholder="ticket title"
+                        value={title}
+                        onChange={(e) => setTitle(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Escape') setAdding(false)
+                        }}
+                      />
+                    </form>
+                  )}
+                  <div className="flex flex-1 flex-col gap-2 overflow-y-auto p-2">
+                    {(grouped[col] ?? []).map((t) => (
+                      <button
+                        key={t.id}
+                        onClick={() => openTicket(t.id)}
+                        className={cn(
+                          'relative px-3 py-3 text-left text-[18px]',
+                          sel === t.id
+                            ? 'border-l-2 border-accent bg-accent/15 text-accent'
+                            : 'border-l-2 border-transparent bg-panel hover:bg-panel2',
+                        )}
+                      >
+                        <div className="line-clamp-2">{t.title}</div>
+                        <div className="mt-1.5 font-mono text-[14px] text-faint">
+                          {t.kind === 'validate' ? 'validate · ' : ''}
+                          {t.id}
+                        </div>
+                        {(t.usd || 0) > 0 && (
+                          <div className="mt-2 text-left text-[13px] text-accent">
+                            ${Number(t.usd).toFixed(3)}
+                          </div>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </section>
+              ))}
+            </div>
+          ))}
+        </main>
+
+        <aside className="flex w-[300px] shrink-0 flex-col border-l border-border bg-panel">
+          <div className="border-b border-border px-4 py-3 text-[16px] tracking-[0.08em] text-muted">
+            EVENTS
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 font-mono text-[14px] leading-6">
+            {events.length === 0 && <p className="text-faint">no events yet</p>}
+            {events.map((line, i) => (
               <div
-                key={`${line.at}-${i}`}
+                key={`e-${line.at}-${i}`}
                 className={cn(
-                  'mb-1 whitespace-pre-wrap break-words',
+                  'mb-1.5 whitespace-pre-wrap break-words',
                   line.kind === 'stderr' ? 'text-red-400' : line.kind === 'cycle' ? 'text-accent' : 'text-fg',
                 )}
               >
@@ -262,141 +474,179 @@ export default function App() {
                 {line.text}
               </div>
             ))}
+          </div>
+        </aside>
+
+        <aside className="flex w-[380px] shrink-0 flex-col border-l border-border bg-panel">
+          <div className="flex items-center justify-between border-b border-border px-4 py-3 text-[16px] tracking-[0.08em] text-muted">
+            <span>STREAM</span>
+            {streaming && <span className="text-accent">live</span>}
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 font-mono text-[15px] leading-6">
+            {stream.length === 0 && (
+              <p className="text-faint">thinking + tokens appear here while dsh is running</p>
+            )}
+            {stream.map((line, i) => (
+              <div
+                key={`s-${line.at}-${i}`}
+                className={cn(
+                  'mb-2 whitespace-pre-wrap break-words',
+                  line.kind === 'think'
+                    ? 'text-muted italic'
+                    : line.kind === 'tool'
+                      ? 'text-accent'
+                      : 'text-fg',
+                )}
+              >
+                {line.kind === 'think' && <span className="mr-2 not-italic text-faint">think</span>}
+                {line.kind === 'tool' && <span className="mr-2 text-accent">tool</span>}
+                {line.text}
+                {(line.kind === 'token' || line.kind === 'think') && i === stream.length - 1 && (
+                  <span className="ml-0.5 inline-block h-[1em] w-[0.5ch] bg-accent align-text-bottom" />
+                )}
+              </div>
+            ))}
             <div ref={feedEnd} />
           </div>
         </aside>
 
-        <main className="flex min-w-0 flex-1 flex-col">
-          <div className="flex min-h-0 flex-1 overflow-x-auto">
-            {COLS.map((col) => (
-              <section
-                key={col}
-                className="flex w-[220px] shrink-0 flex-col border-r border-border"
-              >
-                <div className="border-b border-border px-3 py-2 text-[13px] tracking-[0.08em] text-muted">
-                  {COL_LABEL[col]}{' '}
-                  <span className="text-faint">{grouped[col]?.length ?? 0}</span>
-                </div>
-                <div className="flex flex-1 flex-col gap-1 overflow-y-auto p-2">
-                  {(grouped[col] ?? []).map((t) => (
-                    <button
-                      key={t.id}
-                      onClick={() => setSel(t.id)}
-                      className={cn(
-                        'px-3 py-2 text-left text-[15px]',
-                        sel === t.id
-                          ? 'border-l-2 border-accent bg-accent/15 text-accent'
-                          : 'border-l-2 border-transparent bg-panel hover:bg-panel2',
-                      )}
-                    >
-                      <div className="line-clamp-2">{t.title}</div>
-                      <div className="mt-1 font-mono text-[12px] text-faint">{t.id}</div>
-                    </button>
-                  ))}
-                </div>
-              </section>
-            ))}
-          </div>
-        </main>
-
-        <aside className="flex w-[400px] shrink-0 flex-col border-l border-border bg-panel">
-          <div className="border-b border-border px-3 py-2 text-[13px] tracking-[0.08em] text-muted">
-            {detail ? detail.state : 'TICKET'}
-          </div>
-          <div className="min-h-0 flex-1 overflow-y-auto p-3">
-            {!detail && <p className="text-faint">select a ticket</p>}
-            {detail && (
-              <div className="flex flex-col gap-3">
-                <h2 className="text-[18px]">{detail.title}</h2>
-                <p className="whitespace-pre-wrap text-[15px] text-muted">{detail.body}</p>
-                <div className="flex flex-wrap gap-1">
-                  {detail.state === 'inbox' && (
-                    <Button size="sm" disabled={busy} onClick={() => act(() => api(`/api/tickets/${detail.id}/accept`, { method: 'POST' }))}>
-                      accept
-                    </Button>
-                  )}
-                  {detail.state === 'plan_review' && (
-                    <Button size="sm" disabled={busy} onClick={() => act(() => api(`/api/tickets/${detail.id}/approve-plan`, { method: 'POST' }))}>
-                      approve plan
-                    </Button>
-                  )}
-                  {detail.state === 'merge_review' && (
-                    <Button size="sm" disabled={busy} onClick={() => act(() => api(`/api/tickets/${detail.id}/approve-merge`, { method: 'POST' }))}>
-                      approve merge
-                    </Button>
-                  )}
-                </div>
-                {plan && (
-                  <section>
-                    <div className="mb-1 text-[11px] tracking-[0.08em] text-muted">
-                      PLAN v{plan.version}
-                    </div>
-                    <pre className="whitespace-pre-wrap border border-border bg-bg p-2 text-[14px] text-fg">
-                      {plan.body}
-                    </pre>
-                    <textarea
-                      className="mt-2 h-20 w-full border border-border bg-bg p-2 outline-none focus:border-accent"
-                      placeholder="steer / refine plan"
-                      value={steer}
-                      onChange={(e) => setSteer(e.target.value)}
-                    />
-                    <Button
-                      className="mt-1"
-                      size="sm"
-                      variant="ghost"
-                      disabled={busy || !steer.trim()}
-                      onClick={() =>
-                        act(async () => {
-                          await api(`/api/tickets/${detail.id}/documents`, {
-                            method: 'POST',
-                            body: JSON.stringify({ kind: 'steer', body: steer }),
-                          })
-                          setSteer('')
-                        })
-                      }
-                    >
-                      save steer
-                    </Button>
-                  </section>
-                )}
-                {result && (
-                  <section>
-                    <div className="mb-1 text-[11px] tracking-[0.08em] text-muted">RESULT</div>
-                    <pre className="whitespace-pre-wrap border border-border bg-bg p-2 text-[12px]">
-                      {result.body}
-                    </pre>
-                  </section>
-                )}
-                {detail.runs[0] && (
-                  <section className="text-faint">
-                    last run {detail.runs[0].stage} · {detail.runs[0].status}
-                  </section>
-                )}
-              </div>
-            )}
-          </div>
-        </aside>
-
         {errPane && (
-          <aside className="flex w-[320px] shrink-0 flex-col border-l border-border bg-panel">
-            <div className="border-b border-border px-[10px] py-[8px] text-[11px] tracking-[0.08em] text-muted">
+          <aside className="flex w-[340px] shrink-0 flex-col border-l border-border bg-panel">
+            <div className="border-b border-border px-4 py-3 text-[15px] tracking-[0.08em] text-muted">
               ERRORS
             </div>
             <div className="flex-1 overflow-y-auto">
-              {errors.length === 0 && <p className="p-[10px] text-faint">clean</p>}
+              {errors.length === 0 && <p className="p-4 text-faint">clean</p>}
               {errors.map((e) => (
-                <div key={e.id} className="border-b border-border px-[10px] py-[7px]">
-                  <div className="text-[11px] text-accent">
+                <div key={e.id} className="border-b border-border px-4 py-3">
+                  <div className="text-[15px] text-accent">
                     {e.source} · {e.level}
                   </div>
                   <div>{e.message}</div>
-                  <div className="text-[10px] text-faint">{e.at}</div>
+                  <div className="text-[14px] text-faint">{e.at}</div>
                 </div>
               ))}
             </div>
           </aside>
         )}
       </div>
+
+      {detail && (
+        <div
+          className="fixed inset-0 z-20 flex items-start justify-center bg-black/70 p-8"
+          onClick={closeTicket}
+        >
+          <div
+            className="max-h-[90vh] w-full max-w-3xl overflow-y-auto border border-border bg-panel p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <div className="text-[14px] tracking-[0.08em] text-muted">{detail.state}</div>
+                <h2 className="text-[24px] leading-snug">{detail.title}</h2>
+              </div>
+              <Button variant="ghost" size="sm" onClick={closeTicket}>
+                close
+              </Button>
+            </div>
+            <p className="whitespace-pre-wrap text-[18px] text-muted">{detail.body}</p>
+            <div className="mt-3 flex flex-wrap gap-1">
+              {(detail.state === 'inbox' || detail.state === 'proposed') && (
+                <Button
+                  size="sm"
+                  disabled={busy}
+                  onClick={() =>
+                    act(async () => {
+                      await api(`/api/tickets/${detail.id}/accept`, { method: 'POST' })
+                      closeTicket()
+                    })
+                  }
+                >
+                  {detail.state === 'proposed'
+                    ? 'approve spawn'
+                    : detail.kind === 'validate'
+                      ? 'run validation'
+                      : 'accept'}
+                </Button>
+              )}
+              {detail.state === 'plan_review' && (
+                <Button
+                  size="sm"
+                  disabled={busy}
+                  onClick={() =>
+                    act(async () => {
+                      await api(`/api/tickets/${detail.id}/approve-plan`, { method: 'POST' })
+                      closeTicket()
+                    })
+                  }
+                >
+                  approve plan
+                </Button>
+              )}
+              {detail.state === 'merge_review' && (
+                <Button
+                  size="sm"
+                  disabled={busy}
+                  onClick={() =>
+                    act(async () => {
+                      await api(`/api/tickets/${detail.id}/approve-merge`, { method: 'POST' })
+                      closeTicket()
+                    })
+                  }
+                >
+                  approve merge
+                </Button>
+              )}
+            </div>
+            {plan && (
+              <section className="mt-4">
+                <div className="mb-1 text-[15px] tracking-[0.08em] text-muted">
+                  PLAN v{plan.version}
+                </div>
+                <pre className="whitespace-pre-wrap border border-border bg-bg p-3 text-[17px] text-fg">
+                  {plan.body}
+                </pre>
+                <textarea
+                  className="mt-2 h-24 w-full border border-border bg-bg p-3 text-[18px] outline-none focus:border-accent"
+                  placeholder="steer / refine plan"
+                  value={steer}
+                  onChange={(e) => setSteer(e.target.value)}
+                />
+                <Button
+                  className="mt-1"
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy || !steer.trim()}
+                  onClick={() =>
+                    act(async () => {
+                      await api(`/api/tickets/${detail.id}/documents`, {
+                        method: 'POST',
+                        body: JSON.stringify({ kind: 'steer', body: steer }),
+                      })
+                      setSteer('')
+                    })
+                  }
+                >
+                  save steer
+                </Button>
+              </section>
+            )}
+            {result && (
+              <section className="mt-4">
+                <div className="mb-1 text-[15px] tracking-[0.08em] text-muted">RESULT</div>
+                <pre className="whitespace-pre-wrap border border-border bg-bg p-3 text-[16px]">
+                  {result.body}
+                </pre>
+              </section>
+            )}
+            {detail.runs[0] && (
+              <section className="mt-3 text-faint">
+                last run {detail.runs[0].stage} · {detail.runs[0].status}
+              </section>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

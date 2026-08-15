@@ -7,6 +7,8 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 
+from pathlib import Path
+
 from factory import feed, obs, sm
 from factory.db import row_dict, rows
 
@@ -65,23 +67,148 @@ def active_ticket(conn: sqlite3.Connection) -> dict | None:
     return row_dict(
         conn.execute(
             """SELECT * FROM tickets
-               WHERE state NOT IN ('done', 'failed', 'needs_human', 'inbox')
+               WHERE state NOT IN ('done', 'failed', 'needs_human', 'inbox', 'proposed')
                ORDER BY updated_at DESC LIMIT 1"""
         ).fetchone()
     )
 
 
-def create_ticket(conn: sqlite3.Connection, *, project_id: str, title: str, body: str) -> dict:
+def create_ticket(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    title: str,
+    body: str,
+    kind: str = "build",
+    source: str = "human",
+    parent_id: str | None = None,
+) -> dict:
     tid = _id("tkt")
     now = _now()
+    if kind not in ("build", "validate"):
+        kind = "build"
+    if source not in ("human", "factory"):
+        source = "human"
+    state = "proposed" if source == "factory" else "inbox"
     conn.execute(
-        """INSERT INTO tickets (id, project_id, state, title, body, created_at, updated_at)
-           VALUES (?, ?, 'inbox', ?, ?, ?, ?)""",
-        (tid, project_id, title, body, now, now),
+        """INSERT INTO tickets
+           (id, project_id, state, title, body, kind, source, parent_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (tid, project_id, state, title, body, kind, source, parent_id, now, now),
     )
-    add_event(conn, "ticket_created", ticket_id=tid, payload={"title": title})
+    add_event(
+        conn,
+        "ticket_created",
+        ticket_id=tid,
+        payload={"title": title, "kind": kind, "source": source, "state": state},
+    )
     conn.commit()
     return get_ticket(conn, tid)
+
+
+def spawn_from_repo(
+    conn: sqlite3.Connection, *, project_id: str, repo: Path, parent_id: str | None = None
+) -> list[dict]:
+    """Create proposed tickets from repo .meta/spawn.json. Never auto-starts them.
+
+    File shape: {"tickets": [{"title", "body", "kind"?}, ...]}.
+    Skip a title that already exists on this project.
+    """
+    path = repo / ".meta" / "spawn.json"
+    if not path.is_file():
+        return []
+    try:
+        payload = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return []
+    items = payload.get("tickets") if isinstance(payload, dict) else payload
+    if not isinstance(items, list):
+        return []
+    created: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        body = str(item.get("body") or "").strip()
+        kind = str(item.get("kind") or "build")
+        if not title:
+            continue
+        exists = conn.execute(
+            "SELECT 1 FROM tickets WHERE project_id = ? AND title = ? LIMIT 1",
+            (project_id, title),
+        ).fetchone()
+        if exists:
+            continue
+        created.append(
+            create_ticket(
+                conn,
+                project_id=project_id,
+                title=title,
+                body=body,
+                kind=kind,
+                source="factory",
+                parent_id=parent_id,
+            )
+        )
+    return created
+
+
+def append_feed(conn: sqlite3.Connection, item: dict) -> None:
+    conn.execute(
+        """INSERT INTO feed_log (at, kind, text, ticket_id, state, title)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (
+            item.get("at") or "",
+            item.get("kind") or "",
+            item.get("text") or "",
+            item.get("ticket_id"),
+            item.get("state"),
+            item.get("title"),
+        ),
+    )
+    conn.commit()
+
+
+def load_feed(conn: sqlite3.Connection, limit: int = 200) -> list[dict]:
+    rows_ = rows(
+        conn.execute(
+            "SELECT at, kind, text, ticket_id, state, title FROM feed_log ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+    )
+    rows_.reverse()
+    if rows_:
+        return rows_
+    # first boot after restart: reconstruct cycle from events and persist
+    evs = rows(
+        conn.execute(
+            """SELECT at, payload, ticket_id FROM events
+               WHERE type = 'state_changed' ORDER BY id DESC LIMIT ?""",
+            (limit,),
+        )
+    )
+    evs.reverse()
+    out = []
+    for e in evs:
+        try:
+            p = json.loads(e["payload"] or "{}")
+        except json.JSONDecodeError:
+            p = {}
+        src, dst = p.get("from"), p.get("to")
+        if not dst:
+            continue
+        at = (e["at"] or "")[11:19]
+        item = {
+            "at": at,
+            "kind": "cycle",
+            "text": f"{src} → {dst}" if src else str(dst),
+            "ticket_id": e["ticket_id"],
+            "state": dst,
+            "title": None,
+        }
+        append_feed(conn, item)
+        out.append(item)
+    return out
 
 
 def get_ticket(conn: sqlite3.Connection, ticket_id: str) -> dict | None:
@@ -103,8 +230,23 @@ def get_ticket(conn: sqlite3.Connection, ticket_id: str) -> dict | None:
     return t
 
 
-def list_tickets(conn: sqlite3.Connection) -> list[dict]:
-    return rows(conn.execute("SELECT * FROM tickets ORDER BY created_at DESC"))
+def list_tickets(conn: sqlite3.Connection, project: str | None = None) -> list[dict]:
+    sql = """SELECT t.*, p.slug AS project FROM tickets t
+             JOIN projects p ON p.id = t.project_id"""
+    if project:
+        out = rows(
+            conn.execute(sql + " WHERE p.slug = ? ORDER BY t.created_at DESC", (project,))
+        )
+    else:
+        out = rows(conn.execute(sql + " ORDER BY t.created_at DESC"))
+    from factory import cost
+
+    rolls = cost.ticket_rollups(conn)
+    for t in out:
+        part = rolls.get(t["id"]) or {"tokens": 0, "usd": 0.0}
+        t["tokens"] = part.get("tokens") or 0
+        t["usd"] = part.get("usd") or 0.0
+    return out
 
 
 def latest_doc(conn: sqlite3.Connection, ticket_id: str, kind: str) -> dict | None:
@@ -159,7 +301,13 @@ def transition(
     )
     conn.commit()
     obs.emit("state_changed", ticket_id=ticket_id, src=src, dst=dst, actor=actor)
-    feed.publish("cycle", f"{src} → {dst}", ticket_id=ticket_id, state=dst)
+    feed.publish(
+        "cycle",
+        f"{src} → {dst}",
+        ticket_id=ticket_id,
+        state=dst,
+        title=t.get("title"),
+    )
     return get_ticket(conn, ticket_id)
 
 
@@ -202,6 +350,7 @@ def claim_auto(conn: sqlite3.Connection) -> dict | None:
     """One unlocked ticket whose next step is an auto runner edge."""
     for src, dst in (
         ("ready_to_plan", "planning"),
+        ("ready_to_validate", "validating"),
         ("implementing", None),  # already in stage — runner owns the work
         ("validating", None),
         ("pr_open", "merge_review"),

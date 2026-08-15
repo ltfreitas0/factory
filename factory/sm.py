@@ -4,7 +4,9 @@ from __future__ import annotations
 
 STATES = (
     "inbox",
+    "proposed",
     "ready_to_plan",
+    "ready_to_validate",
     "planning",
     "plan_review",
     "implementing",
@@ -21,7 +23,14 @@ STATES = (
 EDGES: frozenset[tuple[str, str, str]] = frozenset(
     {
         ("inbox", "ready_to_plan", "human"),
+        ("inbox", "ready_to_validate", "human"),
         ("inbox", "needs_human", "human"),
+        ("proposed", "ready_to_plan", "human"),
+        ("proposed", "ready_to_validate", "human"),
+        ("proposed", "needs_human", "human"),
+        ("proposed", "inbox", "human"),
+        ("ready_to_validate", "validating", "runner"),
+        ("ready_to_validate", "failed", "runner"),
         ("ready_to_plan", "planning", "runner"),
         ("planning", "plan_review", "runner"),
         ("planning", "failed", "runner"),
@@ -33,6 +42,7 @@ EDGES: frozenset[tuple[str, str, str]] = frozenset(
         ("implementing", "needs_human", "runner"),
         ("validating", "pr_open", "runner"),
         ("validating", "implementing", "runner"),
+        ("validating", "done", "runner"),
         ("validating", "failed", "runner"),
         ("pr_open", "merge_review", "runner"),
         ("merge_review", "integrating", "human"),
@@ -41,8 +51,10 @@ EDGES: frozenset[tuple[str, str, str]] = frozenset(
         ("integrating", "done", "runner"),
         ("integrating", "failed", "runner"),
         ("failed", "ready_to_plan", "human"),
+        ("failed", "ready_to_validate", "human"),
         ("failed", "implementing", "human"),
         ("needs_human", "ready_to_plan", "human"),
+        ("needs_human", "ready_to_validate", "human"),
         ("needs_human", "implementing", "human"),
         ("needs_human", "inbox", "human"),
     }
@@ -50,6 +62,7 @@ EDGES: frozenset[tuple[str, str, str]] = frozenset(
 
 AUTO_FROM = {
     "ready_to_plan": "planning",
+    "ready_to_validate": "validating",
     "pr_open": "merge_review",
 }
 

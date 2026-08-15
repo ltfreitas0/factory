@@ -14,6 +14,18 @@ def test_plan_approve_is_human():
     assert not can("plan_review", "implementing", "runner")
 
 
+def test_proposed_is_human_only():
+    assert transition("proposed", "ready_to_plan", "human") == "ready_to_plan"
+    assert not can("proposed", "ready_to_plan", "runner")
+    assert not can("proposed", "planning", "runner")
+
+
+def test_validate_only_path():
+    assert transition("inbox", "ready_to_validate", "human") == "ready_to_validate"
+    assert transition("ready_to_validate", "validating", "runner") == "validating"
+    assert transition("validating", "done", "runner") == "done"
+
+
 def test_illegal_raises():
     try:
         transition("done", "inbox", "human")

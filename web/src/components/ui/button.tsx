@@ -3,7 +3,7 @@ import type { ButtonHTMLAttributes } from 'react'
 import { cn } from '../../lib/utils'
 
 const buttonVariants = cva(
-  'inline-flex items-center justify-center gap-1 rounded-sm text-[13px] tracking-wide transition-colors disabled:opacity-40',
+  'inline-flex items-center justify-center gap-1 rounded-sm text-[17px] tracking-wide transition-colors disabled:opacity-40',
   {
     variants: {
       variant: {
@@ -12,8 +12,8 @@ const buttonVariants = cva(
         danger: 'text-red-400 border border-red-900 hover:bg-red-950/40',
       },
       size: {
-        default: 'h-8 px-3',
-        sm: 'h-7 px-2 text-[12px]',
+        default: 'h-11 px-4',
+        sm: 'h-10 px-3 text-[16px]',
       },
     },
     defaultVariants: { variant: 'default', size: 'default' },

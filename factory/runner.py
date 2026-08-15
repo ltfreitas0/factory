@@ -7,7 +7,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from factory import feed, obs, store, worker
+from factory import cost, feed, obs, store, worker
 from factory.db import connect
 
 
@@ -51,6 +51,10 @@ def handle(conn: sqlite3.Connection, ticket: dict) -> None:
             _plan(conn, ticket, already=True)
         elif state == "implementing":
             _implement(conn, ticket)
+        elif state == "ready_to_validate":
+            store.transition(conn, tid, "validating", "runner")
+            ticket = store.get_ticket(conn, tid) or ticket
+            _validate(conn, ticket)
         elif state == "validating":
             _validate(conn, ticket)
         elif state == "pr_open":
@@ -84,6 +88,7 @@ def _plan(conn: sqlite3.Connection, ticket: dict, already: bool = False) -> None
     store.finish_run(
         conn, run["id"], ok=result.ok, stdout=result.stdout, stderr=result.stderr
     )
+    cost.attach_run(conn, run["id"], tid, run.get("started_at"))
     if not result.ok:
         obs.record_error(
             conn,
@@ -114,10 +119,19 @@ def _implement(conn: sqlite3.Connection, ticket: dict) -> None:
     cwd = _worktree(repo, tid)
     brief = worker.implement_brief(ticket["title"], ticket["body"], plan_body)
     feed.publish("runner", "implementing in worktree…", ticket_id=tid, state="implementing")
-    result = worker.run(cwd, brief, ticket_id=tid)
+    result = worker.run(cwd, brief, timeout=1200, ticket_id=tid)
+    blob = (result.stderr or "") + (result.stdout or "")
+    if (not result.ok) and "STREAM_CLOSED" in blob:
+        feed.publish("runner", "dsh STREAM_CLOSED — retrying once", ticket_id=tid)
+        store.finish_run(
+            conn, run["id"], ok=False, stdout=result.stdout, stderr=result.stderr
+        )
+        run = store.start_run(conn, tid, "implementing")
+        result = worker.run(cwd, brief, timeout=1200, ticket_id=tid)
     store.finish_run(
         conn, run["id"], ok=result.ok, stdout=result.stdout, stderr=result.stderr
     )
+    cost.attach_run(conn, run["id"], tid, run.get("started_at"))
     store.put_doc(conn, tid, "result", result.stdout.strip() or result.stderr, "worker")
     if not result.ok:
         obs.record_error(
@@ -150,7 +164,12 @@ def _validate(conn: sqlite3.Connection, ticket: dict) -> None:
         store.finish_run(
             conn, run["id"], ok=ok, stdout=proc.stdout, stderr=proc.stderr
         )
-        store.transition(conn, tid, "pr_open" if ok else "implementing", "runner")
+        kind = ticket.get("kind") or "build"
+        if ok:
+            nxt = "done" if kind == "validate" else "pr_open"
+        else:
+            nxt = "failed" if kind == "validate" else "implementing"
+        store.transition(conn, tid, nxt, "runner")
         if not ok:
             obs.record_error(
                 conn,
@@ -210,6 +229,15 @@ def _integrate(conn: sqlite3.Connection, ticket: dict) -> None:
             store.transition(conn, tid, "failed", "runner")
             return
         store.transition(conn, tid, "done", "runner")
+        spawned = store.spawn_from_repo(
+            conn, project_id=ticket["project_id"], repo=repo, parent_id=tid
+        )
+        if spawned:
+            feed.publish(
+                "runner",
+                f"spawned {len(spawned)} ticket(s) for review",
+                ticket_id=tid,
+            )
     except Exception:
         store.finish_run(conn, run["id"], ok=False, stdout="", stderr="integrate crashed")
         raise

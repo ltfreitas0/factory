@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS tickets (
   state TEXT NOT NULL,
   title TEXT NOT NULL,
   body TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'build',
+  source TEXT NOT NULL DEFAULT 'human',
   parent_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -67,6 +69,15 @@ CREATE TABLE IF NOT EXISTS errors (
   run_id TEXT,
   at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS feed_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  text TEXT NOT NULL,
+  ticket_id TEXT,
+  state TEXT,
+  title TEXT
+);
 """
 
 
@@ -81,6 +92,22 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tickets)")}
+    if "kind" not in cols:
+        conn.execute("ALTER TABLE tickets ADD COLUMN kind TEXT NOT NULL DEFAULT 'build'")
+    if "source" not in cols:
+        conn.execute("ALTER TABLE tickets ADD COLUMN source TEXT NOT NULL DEFAULT 'human'")
+    rcols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+    if "usage_json" not in rcols:
+        conn.execute("ALTER TABLE runs ADD COLUMN usage_json TEXT")
+    pcols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
+    if "workflow" not in pcols:
+        conn.execute("ALTER TABLE projects ADD COLUMN workflow TEXT")
+    from factory import files as files_mod
+    from factory import messages as messages_mod
+
+    files_mod.ensure_schema(conn)
+    messages_mod.ensure_schema(conn)
     conn.commit()
     return conn
 

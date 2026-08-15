@@ -25,9 +25,62 @@ body,
 body {
   margin: 0;
   font-family: var(--font-sans);
-  font-size: 16px;
+  font-size: 20px;
+  line-height: 1.5;
 }
 
 * {
   box-sizing: border-box;
+  scrollbar-width: auto;
+  scrollbar-color: #3f3f46 #0c0c0c;
+}
+
+*::-webkit-scrollbar {
+  width: 14px;
+  height: 14px;
+}
+
+*::-webkit-scrollbar-track {
+  background: #0c0c0c;
+  border-left: 1px solid #181818;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+  border: 3px solid #0c0c0c;
+  border-radius: 8px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: #ea580c;
+}
+
+*::-webkit-scrollbar-corner {
+  background: #0c0c0c;
+}
+
+@keyframes pulse-accent {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgb(234 88 12 / 0.45);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgb(234 88 12 / 0);
+  }
+}
+
+.cycle-live {
+  animation: pulse-accent 1.6s ease-out infinite;
+}
+
+@keyframes cycle-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.cycle-spin {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: cycle-spin 28s linear infinite;
 }
