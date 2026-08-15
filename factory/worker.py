@@ -5,8 +5,11 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
+
+from factory import feed
 
 
 @dataclass
@@ -25,26 +28,52 @@ def available() -> bool:
     return shutil.which(_bin()) is not None
 
 
-def run(cwd: Path, brief: str, timeout: int = 600) -> WorkerResult:
+def run(cwd: Path, brief: str, timeout: int = 600, ticket_id: str | None = None) -> WorkerResult:
     cmd = [_bin(), "--profile", "headless", brief]
+    feed.publish("agent", f"$ {' '.join(cmd[:3])} …", ticket_id=ticket_id)
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=cwd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
             env=os.environ.copy(),
         )
+        out_chunks: list[str] = []
+        err_chunks: list[str] = []
+
+        def pump(stream, chunks, kind: str) -> None:
+            assert stream is not None
+            for line in stream:
+                chunks.append(line)
+                text = line.rstrip("\n")
+                if text:
+                    feed.publish(kind, text, ticket_id=ticket_id)
+
+        t_out = threading.Thread(target=pump, args=(proc.stdout, out_chunks, "agent"), daemon=True)
+        t_err = threading.Thread(target=pump, args=(proc.stderr, err_chunks, "stderr"), daemon=True)
+        t_out.start()
+        t_err.start()
+        try:
+            code = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            t_out.join(timeout=2)
+            t_err.join(timeout=2)
+            feed.publish("stderr", "worker timeout", ticket_id=ticket_id)
+            return WorkerResult(ok=False, stdout="".join(out_chunks), stderr="timeout", code=124)
+        t_out.join(timeout=2)
+        t_err.join(timeout=2)
         return WorkerResult(
-            ok=proc.returncode == 0,
-            stdout=proc.stdout or "",
-            stderr=proc.stderr or "",
-            code=proc.returncode,
+            ok=code == 0,
+            stdout="".join(out_chunks),
+            stderr="".join(err_chunks),
+            code=code,
         )
-    except subprocess.TimeoutExpired as exc:
-        return WorkerResult(ok=False, stdout=exc.stdout or "", stderr="timeout", code=124)
     except FileNotFoundError:
+        feed.publish("stderr", f"{_bin()} not on PATH", ticket_id=ticket_id)
         return WorkerResult(ok=False, stdout="", stderr=f"{_bin()} not on PATH", code=127)
 
 
@@ -64,5 +93,6 @@ def implement_brief(title: str, body: str, plan: str) -> str:
         f"Ticket: {title}\n\n{body}\n\n"
         f"Approved plan:\n{plan}\n\n"
         "Make the smallest change that satisfies the plan. "
-        "Do not git commit unless asked. When done, print a 5-line summary of what you changed."
+        "Add or update tests so the project's validate command passes. "
+        "When done, print a short summary of files changed."
     )

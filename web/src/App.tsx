@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Activity, Plus, RefreshCw } from 'lucide-react'
 import { Button } from './components/ui/button'
 import { cn } from './lib/utils'
@@ -16,7 +16,30 @@ type Doc = { id: string; kind: string; version: number; body: string; author: st
 type Run = { id: string; stage: string; status: string; stdout: string | null; stderr: string | null }
 type Detail = Ticket & { documents: Doc[]; runs: Run[] }
 type Err = { id: number; source: string; level: string; message: string; at: string; ticket_id: string | null }
-type Health = { ok: boolean; open_tickets: number; errors: number }
+type Health = {
+  ok: boolean
+  open_tickets: number
+  errors: number
+  active?: { id: string; state: string; title: string } | null
+}
+type FeedItem = { at: string; kind: string; text: string; ticket_id?: string | null; state?: string | null }
+
+const CYCLE = [
+  { id: 'inbox', label: 'inbox' },
+  { id: 'planning', label: 'plan' },
+  { id: 'plan_review', label: 'review' },
+  { id: 'implementing', label: 'build' },
+  { id: 'validating', label: 'check' },
+  { id: 'merge_review', label: 'merge' },
+  { id: 'done', label: 'done' },
+] as const
+
+function cycleId(state: string): string {
+  if (state === 'ready_to_plan') return 'planning'
+  if (state === 'pr_open' || state === 'integrating') return 'merge_review'
+  if (state === 'failed' || state === 'needs_human') return state
+  return state
+}
 
 const COLS = [
   'inbox',
@@ -68,6 +91,8 @@ export default function App() {
   const [errPane, setErrPane] = useState(false)
   const [busy, setBusy] = useState(false)
   const [flash, setFlash] = useState<string | null>(null)
+  const [feed, setFeed] = useState<FeedItem[]>([])
+  const feedEnd = useRef<HTMLDivElement>(null)
 
   const load = useCallback(async () => {
     const [ts, es, h] = await Promise.all([
@@ -86,6 +111,26 @@ export default function App() {
     const id = setInterval(() => load().catch(() => {}), 2500)
     return () => clearInterval(id)
   }, [load])
+
+  useEffect(() => {
+    const es = new EventSource('/api/stream')
+    es.onmessage = (ev) => {
+      try {
+        const item = JSON.parse(ev.data) as FeedItem
+        setFeed((prev) => {
+          const next = [...prev, item]
+          return next.length > 400 ? next.slice(-400) : next
+        })
+      } catch {
+        /* ignore */
+      }
+    }
+    return () => es.close()
+  }, [])
+
+  useEffect(() => {
+    feedEnd.current?.scrollIntoView({ block: 'end' })
+  }, [feed])
 
   const grouped = useMemo(() => {
     const m: Record<string, Ticket[]> = {}
@@ -113,27 +158,49 @@ export default function App() {
 
   const plan = detail ? latest(detail.documents, 'plan') : undefined
   const result = detail ? latest(detail.documents, 'result') : undefined
+  const live = health?.active
+  const liveState = live ? cycleId(live.state) : ''
 
   return (
     <div className="flex h-full flex-col bg-bg text-fg">
-      <header className="flex h-10 items-center justify-between border-b border-border bg-panel px-[10px]">
-        <div className="flex items-center gap-3">
-          <span className="tracking-[0.14em] text-accent">FACTORY</span>
-          <span className="text-faint">
-            {health ? `${health.open_tickets} open · ${health.errors} errors` : '…'}
-          </span>
+      <header className="flex flex-col border-b border-border bg-panel">
+        <div className="flex h-12 items-center justify-between px-4">
+          <div className="flex items-center gap-4">
+            <span className="text-[15px] tracking-[0.16em] text-accent">FACTORY</span>
+            <span className="text-muted">
+              {health ? `${health.open_tickets} open · ${health.errors} errors` : '…'}
+            </span>
+            {live && <span className="text-faint">· {live.title}</span>}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" onClick={() => load()}>
+              <RefreshCw size={14} />
+            </Button>
+            <Button
+              variant={errPane ? 'default' : 'ghost'}
+              size="sm"
+              onClick={() => setErrPane((v) => !v)}
+            >
+              <Activity size={14} /> health
+            </Button>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" size="sm" onClick={() => load()}>
-            <RefreshCw size={12} />
-          </Button>
-          <Button
-            variant={errPane ? 'default' : 'ghost'}
-            size="sm"
-            onClick={() => setErrPane((v) => !v)}
-          >
-            <Activity size={12} /> health
-          </Button>
+        <div className="flex items-center gap-1 overflow-x-auto border-t border-border px-4 py-2">
+          {CYCLE.map((step, i) => (
+            <div key={step.id} className="flex items-center gap-1">
+              {i > 0 && <span className="px-1 text-faint">→</span>}
+              <span
+                className={cn(
+                  'rounded-sm px-2 py-1 text-[13px] tracking-[0.08em]',
+                  liveState === step.id
+                    ? 'border border-accent bg-accent/15 text-accent'
+                    : 'border border-transparent text-muted',
+                )}
+              >
+                {step.label}
+              </span>
+            </div>
+          ))}
         </div>
       </header>
 
@@ -142,19 +209,19 @@ export default function App() {
       )}
 
       <div className="flex min-h-0 flex-1">
-        <aside className="flex w-[240px] shrink-0 flex-col border-r border-border bg-panel">
-          <div className="border-b border-border px-[10px] py-[8px] text-[11px] tracking-[0.08em] text-muted">
-            NEW TICKET
+        <aside className="flex w-[300px] shrink-0 flex-col border-r border-border bg-panel">
+          <div className="border-b border-border px-3 py-2 text-[12px] tracking-[0.08em] text-muted">
+            NEW · CORPORA
           </div>
           <form
-            className="flex flex-1 flex-col gap-2 p-[10px]"
+            className="flex flex-col gap-2 border-b border-border p-3"
             onSubmit={(e) => {
               e.preventDefault()
               if (!title.trim()) return
               act(async () => {
                 const t = await api<Ticket>('/api/tickets', {
                   method: 'POST',
-                  body: JSON.stringify({ title, body }),
+                  body: JSON.stringify({ title, body, project: 'corpora' }),
                 })
                 setTitle('')
                 setBody('')
@@ -163,21 +230,40 @@ export default function App() {
             }}
           >
             <input
-              className="h-8 border border-border bg-bg px-2 text-fg outline-none focus:border-accent"
+              className="h-9 border border-border bg-bg px-2 text-[15px] text-fg outline-none focus:border-accent"
               placeholder="title"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
             />
             <textarea
-              className="min-h-[120px] flex-1 resize-none border border-border bg-bg p-2 text-fg outline-none focus:border-accent"
+              className="h-20 resize-none border border-border bg-bg p-2 text-[15px] text-fg outline-none focus:border-accent"
               placeholder="what should the factory do?"
               value={body}
               onChange={(e) => setBody(e.target.value)}
             />
             <Button type="submit" disabled={busy || !title.trim()}>
-              <Plus size={12} /> file
+              <Plus size={14} /> file
             </Button>
           </form>
+          <div className="border-b border-border px-3 py-2 text-[12px] tracking-[0.08em] text-muted">
+            AGENT FEED
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2 font-mono text-[13px] leading-5">
+            {feed.length === 0 && <p className="text-faint">waiting for a run…</p>}
+            {feed.map((line, i) => (
+              <div
+                key={`${line.at}-${i}`}
+                className={cn(
+                  'mb-1 whitespace-pre-wrap break-words',
+                  line.kind === 'stderr' ? 'text-red-400' : line.kind === 'cycle' ? 'text-accent' : 'text-fg',
+                )}
+              >
+                <span className="text-faint">{line.at} </span>
+                {line.text}
+              </div>
+            ))}
+            <div ref={feedEnd} />
+          </div>
         </aside>
 
         <main className="flex min-w-0 flex-1 flex-col">
@@ -185,26 +271,26 @@ export default function App() {
             {COLS.map((col) => (
               <section
                 key={col}
-                className="flex w-[180px] shrink-0 flex-col border-r border-border"
+                className="flex w-[220px] shrink-0 flex-col border-r border-border"
               >
-                <div className="border-b border-border px-[8px] py-[8px] text-[11px] tracking-[0.08em] text-muted">
+                <div className="border-b border-border px-3 py-2 text-[13px] tracking-[0.08em] text-muted">
                   {COL_LABEL[col]}{' '}
                   <span className="text-faint">{grouped[col]?.length ?? 0}</span>
                 </div>
-                <div className="flex flex-1 flex-col gap-1 overflow-y-auto p-[6px]">
+                <div className="flex flex-1 flex-col gap-1 overflow-y-auto p-2">
                   {(grouped[col] ?? []).map((t) => (
                     <button
                       key={t.id}
                       onClick={() => setSel(t.id)}
                       className={cn(
-                        'px-[8px] py-[7px] text-left',
+                        'px-3 py-2 text-left text-[15px]',
                         sel === t.id
                           ? 'border-l-2 border-accent bg-accent/15 text-accent'
                           : 'border-l-2 border-transparent bg-panel hover:bg-panel2',
                       )}
                     >
                       <div className="line-clamp-2">{t.title}</div>
-                      <div className="mt-1 font-mono text-[10px] text-faint">{t.id}</div>
+                      <div className="mt-1 font-mono text-[12px] text-faint">{t.id}</div>
                     </button>
                   ))}
                 </div>
@@ -213,16 +299,16 @@ export default function App() {
           </div>
         </main>
 
-        <aside className="flex w-[360px] shrink-0 flex-col border-l border-border bg-panel">
-          <div className="border-b border-border px-[10px] py-[8px] text-[11px] tracking-[0.08em] text-muted">
+        <aside className="flex w-[400px] shrink-0 flex-col border-l border-border bg-panel">
+          <div className="border-b border-border px-3 py-2 text-[13px] tracking-[0.08em] text-muted">
             {detail ? detail.state : 'TICKET'}
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto p-[10px]">
+          <div className="min-h-0 flex-1 overflow-y-auto p-3">
             {!detail && <p className="text-faint">select a ticket</p>}
             {detail && (
               <div className="flex flex-col gap-3">
-                <h2 className="text-[15px]">{detail.title}</h2>
-                <p className="whitespace-pre-wrap text-muted">{detail.body}</p>
+                <h2 className="text-[18px]">{detail.title}</h2>
+                <p className="whitespace-pre-wrap text-[15px] text-muted">{detail.body}</p>
                 <div className="flex flex-wrap gap-1">
                   {detail.state === 'inbox' && (
                     <Button size="sm" disabled={busy} onClick={() => act(() => api(`/api/tickets/${detail.id}/accept`, { method: 'POST' }))}>
@@ -245,7 +331,7 @@ export default function App() {
                     <div className="mb-1 text-[11px] tracking-[0.08em] text-muted">
                       PLAN v{plan.version}
                     </div>
-                    <pre className="whitespace-pre-wrap border border-border bg-bg p-2 text-[12px] text-fg">
+                    <pre className="whitespace-pre-wrap border border-border bg-bg p-2 text-[14px] text-fg">
                       {plan.body}
                     </pre>
                     <textarea

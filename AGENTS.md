@@ -31,7 +31,11 @@ cd web && bun install && bun run dev   # :5510, proxies /api
 
 ## Slice
 
+Default product: `corpora` (`/home/bix/projects/corpora`). Playground remains a sandbox project.
+
 inbox → accept → planning (dsh) → plan_review (you) → implementing (dsh) → validating → merge_review (you) → done
+
+UI: kanban + orange cycle + left agent SSE feed (`/api/stream`).
 
 ## Do not
 

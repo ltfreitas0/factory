@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -9,10 +10,10 @@ from threading import Thread
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from factory import obs, runner, sm, store
+from factory import feed, obs, runner, sm, store
 from factory.db import connect, rows
 from factory.sm import IllegalTransition
 
@@ -25,6 +26,10 @@ async def lifespan(app: FastAPI):
     playground = ROOT / "data" / "playground"
     _ensure_git_repo(playground)
     store.ensure_playground(conn, str(playground))
+    corpora = Path("/home/bix/projects/corpora")
+    _ensure_git_repo(corpora, readme="# corpora\n")
+    store.ensure_project(conn, "corpora", str(corpora), "true")
+    _seed_corpora(conn)
     app.state.db = conn
     t = Thread(target=runner.loop, daemon=True)
     t.start()
@@ -58,7 +63,7 @@ async def all_errors(request, exc):
 class TicketIn(BaseModel):
     title: str
     body: str = ""
-    project: str = "playground"
+    project: str = "corpora"
 
 
 class TransitionIn(BaseModel):
@@ -76,20 +81,52 @@ def _db():
     return app.state.db
 
 
-def _ensure_git_repo(path: Path) -> None:
+def _ensure_git_repo(path: Path, readme: str | None = None) -> None:
     path.mkdir(parents=True, exist_ok=True)
     if (path / ".git").exists():
         return
     import subprocess
 
     subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
-    (path / "README.md").write_text("# playground\n\nFactory implementer target.\n")
-    subprocess.run(["git", "add", "README.md"], cwd=path, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "-c", "user.email=factory@local", "-c", "user.name=factory", "commit", "-m", "init"],
-        cwd=path,
-        check=True,
-        capture_output=True,
+    readme_path = path / "README.md"
+    if not readme_path.exists():
+        readme_path.write_text(readme or "# playground\n\nFactory implementer target.\n")
+    subprocess.run(["git", "add", "-A"], cwd=path, check=True, capture_output=True)
+    staged = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=path)
+    if staged.returncode != 0:
+        subprocess.run(
+            ["git", "-c", "user.email=factory@local", "-c", "user.name=factory", "commit", "-m", "init"],
+            cwd=path,
+            check=True,
+            capture_output=True,
+        )
+
+
+def _seed_corpora(conn) -> None:
+    spec = Path("/home/bix/projects/corpora/.meta/readme.d")
+    n = conn.execute(
+        """SELECT COUNT(*) n FROM tickets t
+           JOIN projects p ON p.id = t.project_id WHERE p.slug = 'corpora'"""
+    ).fetchone()["n"]
+    if n:
+        return
+    proj = conn.execute("SELECT * FROM projects WHERE slug = 'corpora'").fetchone()
+    if not proj:
+        return
+    body = spec.read_text() if spec.exists() else "Build CORPORA v1."
+    store.create_ticket(
+        conn,
+        project_id=proj["id"],
+        title="CORPORA v1: agent-native kanban + auth + MCP",
+        body=(
+            "Build CORPORA in this repo. Source of truth for product intent:\n\n"
+            f"{body}\n\n"
+            "First vertical slice: authenticated kanban (columns, cards, assignees) "
+            "plus an MCP surface agents can list/read/create/move cards. "
+            "Keep v1 small. Add tests that prove an agent can move a card with "
+            "valid auth and is rejected without it.\n\n"
+            "Validation: a test command you add must pass; document it in README."
+        ),
     )
 
 
@@ -100,7 +137,16 @@ def health():
     open_n = conn.execute(
         "SELECT COUNT(*) n FROM tickets WHERE state NOT IN ('done')"
     ).fetchone()["n"]
-    return {"ok": True, "open_tickets": open_n, "errors": err_n}
+    active = store.active_ticket(conn)
+    return {
+        "ok": True,
+        "open_tickets": open_n,
+        "errors": err_n,
+        "active": None
+        if not active
+        else {"id": active["id"], "state": active["state"], "title": active["title"]},
+        "default_project": "corpora",
+    }
 
 
 @app.get("/api/projects")
@@ -184,6 +230,45 @@ def events(limit: int = 100):
 @app.get("/api/states")
 def states():
     return {"states": list(sm.STATES)}
+
+
+@app.get("/api/cycle")
+def cycle():
+    active = store.active_ticket(_db())
+    return {
+        "states": list(sm.STATES),
+        "active": None
+        if not active
+        else {"id": active["id"], "state": active["state"], "title": active["title"]},
+    }
+
+
+@app.get("/api/feed")
+def feed_history():
+    return feed.history()
+
+
+@app.get("/api/stream")
+async def stream():
+    q = feed.subscribe()
+
+    async def gen():
+        try:
+            yield ": connected\n\n"
+            for item in feed.history():
+                yield f"data: {feed.dump(item)}\n\n"
+            loop = asyncio.get_event_loop()
+            while True:
+                item = await loop.run_in_executor(None, q.get)
+                yield f"data: {feed.dump(item)}\n\n"
+        finally:
+            feed.unsubscribe(q)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 def main() -> None:

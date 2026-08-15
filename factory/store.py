@@ -7,7 +7,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 
-from factory import obs, sm
+from factory import feed, obs, sm
 from factory.db import row_dict, rows
 
 
@@ -33,18 +33,42 @@ def add_event(
     )
 
 
-def ensure_playground(conn: sqlite3.Connection, repo_path: str) -> dict:
-    row = conn.execute("SELECT * FROM projects WHERE slug = 'playground'").fetchone()
+def ensure_project(
+    conn: sqlite3.Connection,
+    slug: str,
+    repo_path: str,
+    validate_cmd: str = "true",
+) -> dict:
+    row = conn.execute("SELECT * FROM projects WHERE slug = ?", (slug,)).fetchone()
     if row:
-        return dict(row)
+        conn.execute(
+            "UPDATE projects SET repo_path = ?, validate_cmd = ? WHERE slug = ?",
+            (repo_path, validate_cmd, slug),
+        )
+        conn.commit()
+        return dict(conn.execute("SELECT * FROM projects WHERE slug = ?", (slug,)).fetchone())
     pid = _id("prj")
     conn.execute(
         """INSERT INTO projects (id, slug, repo_path, validate_cmd, infra_plugin, created_at)
-           VALUES (?, 'playground', ?, 'true', 'none', ?)""",
-        (pid, repo_path, _now()),
+           VALUES (?, ?, ?, ?, 'none', ?)""",
+        (pid, slug, repo_path, validate_cmd, _now()),
     )
     conn.commit()
     return dict(conn.execute("SELECT * FROM projects WHERE id = ?", (pid,)).fetchone())
+
+
+def ensure_playground(conn: sqlite3.Connection, repo_path: str) -> dict:
+    return ensure_project(conn, "playground", repo_path, "python3 -m pytest -q")
+
+
+def active_ticket(conn: sqlite3.Connection) -> dict | None:
+    return row_dict(
+        conn.execute(
+            """SELECT * FROM tickets
+               WHERE state NOT IN ('done', 'failed', 'needs_human', 'inbox')
+               ORDER BY updated_at DESC LIMIT 1"""
+        ).fetchone()
+    )
 
 
 def create_ticket(conn: sqlite3.Connection, *, project_id: str, title: str, body: str) -> dict:
@@ -135,6 +159,7 @@ def transition(
     )
     conn.commit()
     obs.emit("state_changed", ticket_id=ticket_id, src=src, dst=dst, actor=actor)
+    feed.publish("cycle", f"{src} → {dst}", ticket_id=ticket_id, state=dst)
     return get_ticket(conn, ticket_id)
 
 

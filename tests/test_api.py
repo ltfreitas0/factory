@@ -8,7 +8,10 @@ def test_health_and_ticket_accept():
         h = client.get("/api/health")
         assert h.status_code == 200
         assert h.json()["ok"] is True
-        created = client.post("/api/tickets", json={"title": "say hi", "body": "print hello"})
+        created = client.post(
+            "/api/tickets",
+            json={"title": "say hi", "body": "print hello", "project": "playground"},
+        )
         assert created.status_code == 200
         tid = created.json()["id"]
         acc = client.post(f"/api/tickets/{tid}/accept")
