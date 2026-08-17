@@ -10,3 +10,12 @@ web/dist/
 *.db
 .worktrees/
 .DS_Store
+factory/templates/*/node_modules/
+factory/templates/*/dist/
+.meta/sandbox.env
+.wrangler/
+sandbox-gw/node_modules/
+sandbox-gw/.dev.vars
+sandbox-gw/bun.lock
+routing/node_modules/
+routing/package-lock.json

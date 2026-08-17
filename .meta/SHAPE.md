@@ -4,6 +4,12 @@ Destination architecture. Not a build ticket. Replaces the *specified* future
 in VISION.md’s extra nouns; VISION’s north star (many projects, you as user,
 no auto-prod) still holds.
 
+**Ratified data model + router contract: [DATA.md](DATA.md) (2026-08-16).**
+Supersedes this file where they conflict: tickets are **optional** (`mode:
+live | tickets`, quality gates optional), multi-user with Google auth, R2
+versioning is **immutable snapshots** + a **single mutable `state/`** for the
+sandbox, and the control plane runs in a **Cloudflare container** (CLOUD.md).
+
 **One-liner.** A project is a board (a list of stages) and a filesystem
 (repo + vault). Tickets sit on stages. Everything else durable is a file.
 Inbound systems speak one word: **message**.

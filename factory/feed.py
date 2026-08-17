@@ -7,7 +7,6 @@ import threading
 import time
 from collections import deque
 from queue import Queue
-from typing import Any
 
 _lock = threading.Lock()
 _buf: deque[dict] = deque(maxlen=300)
@@ -20,6 +19,7 @@ def publish(
     text: str,
     *,
     ticket_id: str | None = None,
+    run_id: str | None = None,
     state: str | None = None,
     title: str | None = None,
 ) -> dict:
@@ -28,6 +28,7 @@ def publish(
         "kind": kind,
         "text": text,
         "ticket_id": ticket_id,
+        "run_id": run_id,
         "state": state,
         "title": title,
     }

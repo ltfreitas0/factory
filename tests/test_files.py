@@ -56,6 +56,13 @@ def test_prefix_list(db):
     assert names == ["context/a.md", "context/b.md"]
 
 
+def test_delete_repo_file(db):
+    files.put(db, "p", "context/a.md", "1")
+    files.delete(db, "p", "context/a.md")
+    with pytest.raises(files.FileError):
+        files.get(db, "p", "context/a.md")
+
+
 def test_missing_vault(db):
     with pytest.raises(files.FileError):
         files.get(db, "p", "NOPE", store="vault")

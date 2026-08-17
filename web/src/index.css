@@ -84,3 +84,136 @@ body {
   transform-origin: center;
   animation: cycle-spin 28s linear infinite;
 }
+
+.inspector {
+  width: 27vw;
+  max-width: 27vw;
+  min-width: 0;
+}
+
+.inspector-tabs {
+  display: flex;
+  gap: 0;
+}
+
+.inspector-tab {
+  flex: 1;
+  height: 36px;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: var(--color-faint);
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.inspector-tab:hover {
+  color: var(--color-fg);
+}
+
+.inspector-tab.is-on {
+  color: var(--color-accent);
+  box-shadow: inset 0 -1px 0 var(--color-accent);
+}
+
+.inspector-section {
+  padding: 16px 16px 18px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.inspector-section h3 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-faint);
+}
+
+.flat-input,
+.flat-area {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--color-border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--color-fg);
+  font: inherit;
+  font-size: 14px;
+  outline: none;
+}
+
+.flat-input {
+  height: 34px;
+  padding: 0;
+}
+
+select.flat-input {
+  appearance: none;
+  cursor: pointer;
+}
+
+.flat-area {
+  min-height: 88px;
+  padding: 8px 0;
+  resize: vertical;
+}
+
+.flat-input:focus,
+.flat-area:focus {
+  border-bottom-color: var(--color-accent);
+}
+
+.flat-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--color-muted);
+  font-size: 13px;
+  letter-spacing: 0.06em;
+}
+
+.flat-btn:hover:not(:disabled) {
+  border-color: var(--color-border-hi);
+  color: var(--color-fg);
+}
+
+.flat-btn:disabled {
+  opacity: 0.35;
+}
+
+.flat-btn-primary {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.flat-btn-primary:hover:not(:disabled) {
+  background: rgb(234 88 12 / 0.08);
+}
+
+.flat-btn-danger {
+  border-color: #3f1d1d;
+  color: #f87171;
+}
+
+.rail-tab {
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--color-faint);
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.rail-tab.is-on {
+  color: var(--color-accent);
+  box-shadow: inset 0 -1px 0 var(--color-accent);
+}

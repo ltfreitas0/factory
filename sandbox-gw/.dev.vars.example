@@ -1,0 +1,2 @@
+# Local development secrets for `wrangler dev` (never commit this file).
+GATEWAY_TOKEN=dev-secret

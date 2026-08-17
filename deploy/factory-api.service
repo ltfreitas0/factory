@@ -1,0 +1,18 @@
+[Unit]
+Description=factory API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=factory
+Group=factory
+WorkingDirectory=/opt/factory
+EnvironmentFile=/etc/factory/env
+ExecStart=/opt/factory/.venv/bin/python -m factory.api
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

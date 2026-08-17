@@ -1,0 +1,104 @@
+{
+  // Single deploy config for the factory control plane: a routing Worker that
+  // fronts the FastAPI container (singleton). Run wrangler from THIS directory
+  // (routing/), e.g. `npx wrangler deploy`.
+  //
+  // `image` is relative to this file: "../Dockerfile" resolves to the repo-root
+  // Dockerfile, and wrangler defaults the image build context to the
+  // Dockerfile's directory — i.e. the repo root — so the Dockerfile's
+  // `COPY pyproject.toml uv.lock ./` sees the real files.
+  //
+  // The FastAPI app's runtime env is NOT baked into the image. Non-secret
+  // values go in `vars` below; secrets use `npx wrangler secret put <NAME>`.
+  // The routing Worker forwards every non-empty string env entry to the
+  // container on each start (see src/index.ts).
+
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "factory-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+
+  "containers": [
+    {
+      "class_name": "FactoryContainer",
+      "image": "../Dockerfile",
+      // "standard" is the preserved alias for standard-1 (1/2 vCPU, 4 GiB, 8 GB).
+      "instance_type": "standard",
+      // One writer per CLOUD.md: the singleton FastAPI container.
+      "max_instances": 1
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "FACTORY_CONTAINER",
+        "class_name": "FactoryContainer"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["FactoryContainer"]
+    }
+  ],
+
+  // Placeholders — fill in real values (non-secret ones) before deploy.
+  // Secrets (tokens) are NOT put here; use `npx wrangler secret put <NAME>`.
+  "vars": {
+    // D1 mode (factory/db.py): D1_ACCOUNT_ID + D1_DATABASE_ID + D1_API_TOKEN
+    // (or CLOUDFLARE_API_TOKEN). FACTORY_DB stays unset — it is the local
+    // sqlite path only.
+    "D1_ACCOUNT_ID": "",
+    "D1_DATABASE_ID": "",
+    "D1_API_TOKEN": "", // secret: prefer `wrangler secret put D1_API_TOKEN`
+    "CLOUDFLARE_API_TOKEN": "", // secret: prefer `wrangler secret put`
+    // R2 backend (factory/files.py): S3-compatible creds, selected by
+    // FACTORY_FILES_BACKEND=r2 (missing vars raise per-call otherwise).
+    "FACTORY_FILES_BACKEND": "",
+    "R2_ACCOUNT_ID": "",
+    "R2_ACCESS_KEY_ID": "", // secret
+    "R2_SECRET_ACCESS_KEY": "", // secret
+    "R2_BUCKET": "",
+    "R2_ENDPOINT": "",
+    // Sandbox gateway Worker (per-project preview sandboxes).
+    "SANDBOX_GW_URL": "",
+    "SANDBOX_GW_TOKEN": "", // secret
+    // Board auth (auth.py): leave unset only if Access gates the API.
+    "FACTORY_AUTH_TOKEN": "", // secret
+    // Workspace root for projects inside the (ephemeral) container disk.
+    "FACTORY_ROOT": "/app/workspaces",
+    // uvicorn must listen on all interfaces or the platform probe on 8051
+    // never succeeds (factory.api:main defaults host to 127.0.0.1).
+    "FACTORY_API_HOST": "0.0.0.0",
+    "FACTORY_API_PORT": "", // defaults to 8051 in factory.api:main
+    "FACTORY_CORS": "*",
+    // GitHub app / repo access.
+    "GITHUB_OWNER": "",
+    "GITHUB_TOKEN": "", // secret
+    "GITHUB_OAUTH_CLIENT_ID": "",
+    "GITHUB_OAUTH_CLIENT_SECRET": "", // secret
+    "GITHUB_OAUTH_REDIRECT_URI": "",
+    // Cloudflare account + OAuth connect (apps.py, project.py).
+    "CLOUDFLARE_ACCOUNT_ID": "",
+    "CF_OAUTH_CLIENT_ID": "",
+    "CF_OAUTH_CLIENT_SECRET": "", // secret
+    "CF_OAUTH_REDIRECT_URI": "http://localhost:5510/api/auth/cloudflare/callback",
+    // Google OAuth login (auth.py — multi-user sessions).
+    "GOOGLE_OAUTH_CLIENT_ID": "",
+    "GOOGLE_OAUTH_CLIENT_SECRET": "", // secret
+    "GOOGLE_OAUTH_REDIRECT_URI": "",
+    // Session token signing (auth.py mint/resolve). Set a real value; a
+    // dev-only default exists so local runs work without it.
+    "FACTORY_SESSION_SECRET": "" // secret
+  }
+
+  // Deploy-time concern: bind a custom domain once the zone is set up.
+  // The sandbox previews need a wildcard on this host too (CLOUD.md) —
+  // that wildcard DNS lives on the gateway Worker, not here.
+  // "custom_domains": [
+  //   { "name": "factory-api.example.com", "zone_id": "<zone-id>" }
+  // ]
+}

@@ -11,7 +11,6 @@ from pathlib import Path
 
 from factory import feed, obs, sm
 from factory.db import row_dict, rows
-from factory.machine import IllegalTransition as MachineIllegal
 from factory.machine import apply as machine_apply
 from factory.project import infer_stage_status, legacy_state, workflow_of
 
@@ -54,9 +53,17 @@ def ensure_project(
         return dict(conn.execute("SELECT * FROM projects WHERE slug = ?", (slug,)).fetchone())
     pid = _id("prj")
     conn.execute(
-        """INSERT INTO projects (id, slug, repo_path, validate_cmd, infra_plugin, created_at, workflow)
-           VALUES (?, ?, ?, ?, 'none', ?, ?)""",
-        (pid, slug, repo_path, validate_cmd, _now(), json.dumps(__import__("factory.project", fromlist=["DEFAULT_WORKFLOW"]).DEFAULT_WORKFLOW)),
+        """INSERT INTO projects (id, slug, name, repo_path, validate_cmd, infra_plugin, created_at, workflow)
+           VALUES (?, ?, ?, ?, ?, 'none', ?, ?)""",
+        (
+            pid,
+            slug,
+            slug,
+            repo_path,
+            validate_cmd,
+            _now(),
+            json.dumps(__import__("factory.project", fromlist=["DEFAULT_WORKFLOW"]).DEFAULT_WORKFLOW),
+        ),
     )
     conn.commit()
     return dict(conn.execute("SELECT * FROM projects WHERE id = ?", (pid,)).fetchone())
@@ -367,16 +374,26 @@ def apply_action(
     return get_ticket(conn, ticket_id)
 
 
-def start_run(conn: sqlite3.Connection, ticket_id: str, stage: str) -> dict:
+def start_run(
+    conn: sqlite3.Connection,
+    ticket_id: str | None,
+    stage: str,
+    *,
+    project_id: str | None = None,
+) -> dict:
     rid = _id("run")
     conn.execute(
-        """INSERT INTO runs (id, ticket_id, stage, status, started_at)
-           VALUES (?, ?, ?, 'running', ?)""",
-        (rid, ticket_id, stage, _now()),
+        """INSERT INTO runs (id, ticket_id, project_id, stage, status, started_at)
+           VALUES (?, ?, ?, ?, 'running', ?)""",
+        (rid, ticket_id, project_id, stage, _now()),
     )
     add_event(conn, "run_started", ticket_id=ticket_id, run_id=rid, payload={"stage": stage})
     conn.commit()
     return dict(conn.execute("SELECT * FROM runs WHERE id = ?", (rid,)).fetchone())
+
+
+def get_run(conn: sqlite3.Connection, run_id: str) -> dict | None:
+    return row_dict(conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone())
 
 
 def finish_run(

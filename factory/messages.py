@@ -64,6 +64,12 @@ def ingest(
 ) -> dict:
     ensure_schema(conn)
     check_ingest_token(conn, project_id, token)
+    return add(conn, project_id, source, payload)
+
+
+def add(conn, project_id: str, source: str, payload) -> dict:
+    """Insert a message without token auth (authenticated chat path)."""
+    ensure_schema(conn)
     mid = _id()
     body = json.dumps(payload)
     conn.execute(

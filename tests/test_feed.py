@@ -14,14 +14,14 @@ def test_hydrate_replays():
 
 
 def test_emit_reasoning_and_text():
-    from factory import trace
+    from factory import worker
 
     feed.hydrate([])
-    trace.emit_record(
+    worker.emit_record(
         {"type": "reasoning-chunks", "data": {"texts": ["The", " user"]}},
         "tkt_x",
     )
-    trace.emit_record(
+    worker.emit_record(
         {"type": "text-chunks", "data": {"texts": ["#", " Plan"]}},
         "tkt_x",
     )

@@ -1,0 +1,12 @@
+# Excluded from the container image build context (repo-root Dockerfile).
+.git
+data/
+var/
+.wrangler/
+__pycache__/
+tests/__pycache__/
+web/
+node_modules
+.pytest_cache
+.env
+.meta/sandbox.env
