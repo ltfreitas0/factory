@@ -10,9 +10,7 @@ web/dist/
 *.db
 .worktrees/
 .DS_Store
-factory/templates/*/node_modules/
-factory/templates/*/dist/
-.meta/sandbox.env
+.meta/
 .wrangler/
 sandbox-gw/node_modules/
 sandbox-gw/.dev.vars
